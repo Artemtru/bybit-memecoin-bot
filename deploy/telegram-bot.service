@@ -1,0 +1,14 @@
+[Unit]
+Description=Bybit Bot Telegram Commands
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/bybit-memecoin-bot
+ExecStart=/home/YOUR_USER/bybit-memecoin-bot/venv/bin/python telegram_commands.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

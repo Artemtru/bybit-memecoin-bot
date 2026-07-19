@@ -1,0 +1,16 @@
+[Unit]
+Description=Bybit Memecoin Trading Bot Manager
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/bybit-memecoin-bot
+ExecStart=/home/YOUR_USER/bybit-memecoin-bot/venv/bin/python manager.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/YOUR_USER/bybit-memecoin-bot/logs/service.log
+StandardError=append:/home/YOUR_USER/bybit-memecoin-bot/logs/service-error.log
+
+[Install]
+WantedBy=multi-user.target
