@@ -13,6 +13,7 @@
 
 import os
 import json
+import math
 import time
 import threading
 import logging
@@ -33,8 +34,8 @@ SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "30"))
 MAX_BOTS          = int(os.getenv("MAX_BOTS",          "3"))
 DAILY_LOSS_LIMIT  = float(os.getenv("DAILY_LOSS_LIMIT","-20"))
 LEVERAGE          = int(os.getenv("LEVERAGE",          "3"))
-QTY               = os.getenv("QTY",       "10")
-INTERVAL          = os.getenv("INTERVAL",  "15")
+QTY_USDT          = float(os.getenv("QTY_USDT",        "20"))  # размер позиции в USDT
+INTERVAL          = os.getenv("INTERVAL",  "5")
 RSI_PERIOD        = int(os.getenv("RSI_PERIOD", "14"))
 SLEEP_SEC         = int(os.getenv("SLEEP_SEC",  "60"))
 
@@ -226,10 +227,30 @@ def signal_trend(rsi):
 #   БИРЖЕВЫЕ ФУНКЦИИ
 # ═══════════════════════════════════════════════════
 
-def get_instrument_tick(symbol):
+def get_instrument_info(symbol):
+    """Получить tick_size и qty_step для символа."""
     resp = session.get_instruments_info(category="linear", symbol=symbol)
     info = resp["result"]["list"][0]
-    return float(info["priceFilter"]["tickSize"])
+    tick_size = float(info["priceFilter"]["tickSize"])
+    qty_step  = float(info["lotSizeFilter"]["qtyStep"])
+    min_qty   = float(info["lotSizeFilter"]["minOrderQty"])
+    return tick_size, qty_step, min_qty
+
+
+def calc_qty(price: float, qty_usdt: float, qty_step: float, min_qty: float) -> str:
+    """
+    Рассчитать размер позиции в монетах из суммы в USDT.
+    Гарантирует соответствие qty_step и минимальному размеру.
+    Минимум 5 USDT (требование Bybit).
+    """
+    raw = qty_usdt / price
+    # Округляем вниз до qty_step
+    stepped = math.floor(raw / qty_step) * qty_step
+    # Не меньше минимума
+    result = max(stepped, min_qty)
+    # Точность как у qty_step
+    precision = len(str(qty_step).rstrip("0").split(".")[-1]) if "." in str(qty_step) else 0
+    return str(round(result, precision))
 
 
 def round_price(price, tick_size):
@@ -262,26 +283,38 @@ def set_leverage(symbol):
         pass
 
 
-def open_position(symbol, side, qty, price, atr, tick_size, mode):
+def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode):
     """
-    Открыть позицию с адаптивным TP/SL на основе ATR.
-    Если ATR недоступен — используем фиксированный % (3/2).
+    Открыть позицию с размером в USDT и адаптивным TP/SL.
+    Защита от нулевого TP/SL при малом ATR.
     """
-    if atr:
-        if side == "Buy":
-            tp = round_price(price + atr * ATR_TP_MULT, tick_size)
-            sl = round_price(price - atr * ATR_SL_MULT, tick_size)
-        else:
-            tp = round_price(price - atr * ATR_TP_MULT, tick_size)
-            sl = round_price(price + atr * ATR_SL_MULT, tick_size)
+    # Рассчитываем qty в монетах из QTY_USDT
+    qty = calc_qty(price, QTY_USDT, qty_step, min_qty)
+
+    # Минимальный шаг цены для TP/SL — не менее 0.5% от цены
+    min_move = price * 0.005
+
+    if atr and atr > 0:
+        tp_move = max(atr * ATR_TP_MULT, min_move * 2)
+        sl_move = max(atr * ATR_SL_MULT, min_move)
     else:
-        pct_tp, pct_sl = 0.03, 0.02
-        if side == "Buy":
-            tp = round_price(price * (1 + pct_tp), tick_size)
-            sl = round_price(price * (1 - pct_sl), tick_size)
-        else:
-            tp = round_price(price * (1 - pct_tp), tick_size)
-            sl = round_price(price * (1 + pct_sl), tick_size)
+        tp_move = price * 0.03   # 3% по умолчанию
+        sl_move = price * 0.015  # 1.5% по умолчанию
+
+    if side == "Buy":
+        tp = round_price(price + tp_move, tick_size)
+        sl = round_price(price - sl_move, tick_size)
+    else:
+        tp = round_price(price - tp_move, tick_size)
+        sl = round_price(price + sl_move, tick_size)
+
+    # Финальная проверка — TP и SL не равны нулю и не равны цене
+    if tp <= 0 or sl <= 0 or tp == price or sl == price:
+        log.warning(f"[{symbol}] Некорректные TP={tp} SL={sl} — пропускаем сделку")
+        return
+
+    log.info(f"[{symbol}] Открываю {'LONG' if side=='Buy' else 'SHORT'} | "
+             f"qty:{qty} (~{QTY_USDT}$) | TP:{tp} SL:{sl} | режим:{mode}")
 
     session.place_order(
         category="linear", symbol=symbol,
@@ -289,10 +322,10 @@ def open_position(symbol, side, qty, price, atr, tick_size, mode):
         takeProfit=str(tp), stopLoss=str(sl),
         tpTriggerBy="MarkPrice", slTriggerBy="MarkPrice",
     )
+
     label = "LONG" if side == "Buy" else "SHORT"
-    log.info(f"[{symbol}] {label} открыт | режим:{mode} | TP:{tp} SL:{sl}")
+    log.info(f"[{symbol}] ✅ {label} открыт | режим:{mode} | TP:{tp} SL:{sl}")
     tg.notify_position_opened(symbol, side, qty, price, tp, sl)
-    # Сохраняем данные для записи при закрытии
     coin_data[symbol]["open_price"] = price
     coin_data[symbol]["open_side"]  = side
     coin_data[symbol]["open_mode"]  = mode
@@ -419,9 +452,10 @@ def bot_thread(symbol: str, stop_event: threading.Event):
     set_leverage(symbol)
 
     try:
-        tick_size = get_instrument_tick(symbol)
+        tick_size, qty_step, min_qty = get_instrument_info(symbol)
+        log.info(f"[{symbol}] tick:{tick_size} qty_step:{qty_step} min_qty:{min_qty}")
     except Exception as e:
-        log.error(f"[{symbol}] Не удалось получить tickSize: {e}")
+        log.error(f"[{symbol}] Не удалось получить инфо инструмента: {e}")
         return
 
     while not stop_event.is_set():
@@ -471,7 +505,7 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                     time.sleep(1)
                     pos_side = None
                 if signal and pos_side is None:
-                    open_position(symbol, signal, QTY, price, atr, tick_size, mode)
+                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode)
 
             else:  # trend
                 signal = signal_trend(rsi)
@@ -481,7 +515,7 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                     time.sleep(1)
                     pos_side = None
                 if signal and pos_side is None:
-                    open_position(symbol, signal, QTY, price, atr, tick_size, mode)
+                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode)
 
             if not signal:
                 log.info(f"[{symbol}] Сигнала нет, ждём...")
