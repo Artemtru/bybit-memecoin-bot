@@ -33,7 +33,7 @@ if [ ! -f .env ]; then
 fi
 
 # 5. Systemd сервисы
-for SERVICE in popcat-bot telegram-bot; do
+for SERVICE in memecoin-bot telegram-bot; do
     sed "s/YOUR_USER/$USER_NAME/g; s|bybit-memecoin-bot|$BOT_DIR|g" \
         deploy/$SERVICE.service \
         > $SERVICE_DIR/$SERVICE.service
@@ -42,11 +42,11 @@ done
 
 # 6. Запуск
 systemctl daemon-reload
-systemctl enable popcat-bot telegram-bot
-systemctl start popcat-bot telegram-bot
+systemctl enable memecoin-bot telegram-bot
+systemctl start memecoin-bot telegram-bot
 
 echo ""
 echo "✅ Деплой завершён!"
-echo "   Статус:  sudo systemctl status popcat-bot"
+echo "   Статус:  sudo systemctl status memecoin-bot"
 echo "   Логи:    tail -f $BOT_DIR/logs/service-error.log"
 echo "   Telegram: /status"

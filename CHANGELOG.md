@@ -68,7 +68,7 @@ consecutive_stops = 0      # счётчик стопов для быстрой �
 
 ### 1. Остановить бота:
 ```bash
-sudo systemctl stop popcat-bot telegram-bot
+sudo systemctl stop memecoin-bot telegram-bot
 ```
 
 ### 2. Обновить код:
@@ -86,8 +86,8 @@ echo "DAILY_LOSS_LIMIT=-50" >> .env
 
 ### 4. Перезапустить:
 ```bash
-sudo systemctl start popcat-bot telegram-bot
-sudo systemctl status popcat-bot telegram-bot
+sudo systemctl start memecoin-bot telegram-bot
+sudo systemctl status memecoin-bot telegram-bot
 ```
 
 ---

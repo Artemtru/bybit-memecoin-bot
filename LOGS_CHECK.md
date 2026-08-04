@@ -48,8 +48,8 @@ cat /root/bybit-memecoin-bot/logs/trades.json | jq '[.[] | select(.date >= "2026
 
 #### 3. **Проверить статус systemd:**
 ```bash
-sudo systemctl status popcat-bot.service telegram-bot.service
-sudo journalctl -u popcat-bot.service --since "2 days ago" | tail -100
+sudo systemctl status memecoin-bot.service telegram-bot.service
+sudo journalctl -u memecoin-bot.service --since "2 days ago" | tail -100
 ```
 
 ---
@@ -119,7 +119,7 @@ sudo journalctl -u popcat-bot.service --since "2 days ago" | tail -100
 
 3. **Если trades.json пуст или отсутствует:**
    - Проверить ошибки в `logs/service-error.log`
-   - Проверить статус: `systemctl status popcat-bot`
+   - Проверить статус: `systemctl status memecoin-bot`
    - Проверить API-ключи в `.env`
 
 4. **Если есть сделки, но всё убыточно:**
