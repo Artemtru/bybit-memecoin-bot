@@ -70,7 +70,7 @@ def calc_rsi_from_klines(symbol, interval="15", period=14):
 def scan(
     min_volume_usdt=500_000,     # минимальный объём 24h в USDT
     min_change_pct=3.0,          # минимальное изменение цены за 24h (%)
-    max_change_pct=50.0,         # максимум — слишком памп = опасно
+    max_change_pct=15.0,         # максимум — защита от пампов
     rsi_min=25,                  # RSI не ниже (совсем мёртвая зона)
     rsi_max=75,                  # RSI не выше
     top_n=5,                     # сколько монет вернуть

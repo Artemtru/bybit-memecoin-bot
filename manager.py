@@ -32,9 +32,9 @@ load_dotenv()
 # ── Настройки ────────────────────────────────────────
 SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "30"))
 MAX_BOTS          = int(os.getenv("MAX_BOTS",          "3"))
-DAILY_LOSS_LIMIT  = float(os.getenv("DAILY_LOSS_LIMIT","-20"))
-LEVERAGE          = int(os.getenv("LEVERAGE",          "3"))
-QTY_USDT          = float(os.getenv("QTY_USDT",        "20"))  # размер позиции в USDT
+DAILY_LOSS_LIMIT  = float(os.getenv("DAILY_LOSS_LIMIT","-50"))
+LEVERAGE          = int(os.getenv("LEVERAGE",          "2"))
+QTY_USDT_BASE     = float(os.getenv("QTY_USDT",        "20"))  # базовый размер позиции в USDT
 INTERVAL          = os.getenv("INTERVAL",  "5")
 RSI_PERIOD        = int(os.getenv("RSI_PERIOD", "14"))
 SLEEP_SEC         = int(os.getenv("SLEEP_SEC",  "60"))
@@ -80,6 +80,7 @@ daily_pnl:   float = 0.0
 coin_data:   dict[str, dict] = {}
 block_new_trades: bool = False    # блокировка новых входов при просадке
 adapter_counter:  int  = 0        # счётчик для запуска адаптации раз в N сканирований
+consecutive_stops: int = 0        # счётчик последовательных стоп-лоссов (для быстрой адаптации)
 STATUS_FILE = "logs/status.json"
 
 
@@ -97,7 +98,8 @@ def get_klines(symbol, interval, limit=150):
     closes = [float(c[4]) for c in candles]
     highs  = [float(c[2]) for c in candles]
     lows   = [float(c[3]) for c in candles]
-    return closes, highs, lows
+    volumes = [float(c[5]) for c in candles]  # добавлен объём
+    return closes, highs, lows, volumes
 
 
 def calc_rsi(closes, period=14):
@@ -191,22 +193,31 @@ def detect_market_mode(closes, highs, lows, price):
 #   ТОРГОВЫЕ СИГНАЛЫ
 # ═══════════════════════════════════════════════════
 
-def signal_sideways(closes, highs, lows, price, rsi):
+def signal_sideways(closes, highs, lows, price, rsi, volumes=None):
     """
-    Стратегия для боковика — Bollinger Bands + RSI-фильтр.
+    Стратегия для боковика — Bollinger Bands + RSI-фильтр + объёмный фильтр.
 
-    Long:  цена пробила нижнюю полосу BB + RSI < 50 (не в зоне перекупленности)
-    Short: цена пробила верхнюю полосу BB + RSI > 50
+    Long:  цена пробила нижнюю полосу BB + RSI < 50 + всплеск объёма
+    Short: цена пробила верхнюю полосу BB + RSI > 50 + всплеск объёма
+    
+    volumes: опциональный массив объёмов для фильтрации
     """
     mid, upper, lower = calc_bollinger(closes, BB_PERIOD, BB_STD)
     if mid is None:
         return None, None, None
 
     prev_close = closes[-2]
+    
+    # Объёмный фильтр (если доступен)
+    volume_confirmed = True
+    if volumes and len(volumes) >= 20:
+        avg_volume = sum(volumes[-20:-1]) / 19  # средний объём за 19 периодов
+        current_volume = volumes[-1]
+        volume_confirmed = current_volume > avg_volume * 1.3  # всплеск на 30%+
 
-    if prev_close <= lower and price > lower and rsi < 55:
+    if prev_close <= lower and price > lower and rsi < 55 and volume_confirmed:
         return "Buy", mid, lower   # Long: отскок от нижней полосы
-    if prev_close >= upper and price < upper and rsi > 45:
+    if prev_close >= upper and price < upper and rsi > 45 and volume_confirmed:
         return "Sell", mid, upper  # Short: отскок от верхней полосы
 
     return None, None, None
@@ -253,6 +264,27 @@ def calc_qty(price: float, qty_usdt: float, qty_step: float, min_qty: float) -> 
     return str(round(result, precision))
 
 
+def calc_adaptive_qty(price: float, atr_pct: float, qty_step: float, min_qty: float) -> str:
+    """
+    Адаптивный размер позиции: больше волатильность → меньше риск.
+    
+    Формула: qty_usdt = QTY_USDT_BASE / (1 + atr_pct * 10)
+    Пример: ATR=2% → множитель 1.2 → позиция 20/1.2 = 16.6 USDT
+            ATR=5% → множитель 1.5 → позиция 20/1.5 = 13.3 USDT
+    """
+    if atr_pct is None or atr_pct <= 0:
+        atr_pct = 0.02  # дефолт 2%
+    
+    # Снижаем размер при высокой волатильности
+    volume_mult = 1 / (1 + atr_pct * 10)
+    qty_usdt = QTY_USDT_BASE * volume_mult
+    
+    # Минимум 5 USDT (требование Bybit)
+    qty_usdt = max(qty_usdt, 5.0)
+    
+    return calc_qty(price, qty_usdt, qty_step, min_qty)
+
+
 def round_price(price, tick_size):
     precision = len(str(tick_size).rstrip("0").split(".")[-1]) if "." in str(tick_size) else 0
     return round(round(price / tick_size) * tick_size, precision)
@@ -283,13 +315,23 @@ def set_leverage(symbol):
         pass
 
 
-def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode):
+def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode, atr_pct=None):
     """
-    Открыть позицию с размером в USDT и адаптивным TP/SL.
-    Защита от нулевого TP/SL при малом ATR.
+    Открыть позицию с адаптивным размером и защитой от фандинга.
+    Использует Limit IOC для защиты от проскальзывания.
     """
-    # Рассчитываем qty в монетах из QTY_USDT
-    qty = calc_qty(price, QTY_USDT, qty_step, min_qty)
+    # 1. Проверка фандинга
+    try:
+        ticker = session.get_tickers(category="linear", symbol=symbol)
+        funding_rate = float(ticker["result"]["list"][0]["fundingRate"])
+        if abs(funding_rate) > 0.0005:  # > 0.05% фандинг
+            log.warning(f"[{symbol}] Фандинг высокий ({funding_rate:.4%}), пропускаем вход")
+            return
+    except Exception as e:
+        log.warning(f"[{symbol}] Не удалось проверить фандинг: {e}")
+    
+    # 2. Адаптивный размер позиции
+    qty = calc_adaptive_qty(price, atr_pct or 0.02, qty_step, min_qty)
 
     # Минимальный шаг цены для TP/SL — не менее 0.5% от цены
     min_move = price * 0.005
@@ -313,12 +355,20 @@ def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode):
         log.warning(f"[{symbol}] Некорректные TP={tp} SL={sl} — пропускаем сделку")
         return
 
+    # 3. Limit IOC ордер для защиты от проскальзывания (±0.3% толерантность)
+    if side == "Buy":
+        limit_price = round_price(price * 1.003, tick_size)  # +0.3% для покупки
+    else:
+        limit_price = round_price(price * 0.997, tick_size)  # -0.3% для продажи
+    
+    estimated_usdt = float(qty) * price
     log.info(f"[{symbol}] Открываю {'LONG' if side=='Buy' else 'SHORT'} | "
-             f"qty:{qty} (~{QTY_USDT}$) | TP:{tp} SL:{sl} | режим:{mode}")
+             f"qty:{qty} (~{estimated_usdt:.1f}$) | Limit:{limit_price} | TP:{tp} SL:{sl} | режим:{mode}")
 
     session.place_order(
         category="linear", symbol=symbol,
-        side=side, orderType="Market", qty=qty,
+        side=side, orderType="Limit", qty=qty,
+        price=str(limit_price), timeInForce="IOC",  # Immediate-Or-Cancel
         takeProfit=str(tp), stopLoss=str(sl),
         tpTriggerBy="MarkPrice", slTriggerBy="MarkPrice",
     )
@@ -332,6 +382,8 @@ def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode):
 
 
 def close_position(symbol, side, qty, pnl=0.0, result="signal", exit_price=None):
+    global consecutive_stops
+    
     cancel_orders(symbol)
     close_side = "Sell" if side == "Buy" else "Buy"
     session.place_order(
@@ -341,6 +393,13 @@ def close_position(symbol, side, qty, pnl=0.0, result="signal", exit_price=None)
     )
     log.info(f"[{symbol}] Позиция закрыта | PnL:{pnl:+.4f}")
     tg.notify_position_closed(symbol, side, pnl)
+    
+    # Счётчик последовательных стопов
+    if pnl < 0:
+        consecutive_stops += 1
+    else:
+        consecutive_stops = 0  # сброс при прибыльной сделке
+    
     # Записать сделку в базу
     tracker.record_trade(
         symbol=symbol,
@@ -460,7 +519,7 @@ def bot_thread(symbol: str, stop_event: threading.Event):
 
     while not stop_event.is_set():
         try:
-            closes, highs, lows = get_klines(symbol, INTERVAL)
+            closes, highs, lows, volumes = get_klines(symbol, INTERVAL)
             price = closes[-1]
             rsi   = calc_rsi(closes, RSI_PERIOD)
             atr   = calc_atr(closes, highs, lows, ATR_PERIOD)
@@ -498,14 +557,14 @@ def bot_thread(symbol: str, stop_event: threading.Event):
             if block_new_trades and not pos_side:
                 log.info(f"[{symbol}] ⛔ Новые входы заблокированы адаптером")
             elif mode == "sideways":
-                signal, bb_mid, bb_edge = signal_sideways(closes, highs, lows, price, rsi)
+                signal, bb_mid, bb_edge = signal_sideways(closes, highs, lows, price, rsi, volumes)
                 if signal and pos_side and pos_side != signal:
                     daily_pnl += pnl
                     close_position(symbol, pos_side, pos_qty, pnl)
                     time.sleep(1)
                     pos_side = None
                 if signal and pos_side is None:
-                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode)
+                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct)
 
             else:  # trend
                 signal = signal_trend(rsi)
@@ -515,7 +574,7 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                     time.sleep(1)
                     pos_side = None
                 if signal and pos_side is None:
-                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode)
+                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct)
 
             if not signal:
                 log.info(f"[{symbol}] Сигнала нет, ждём...")
@@ -578,7 +637,7 @@ def print_status():
 # ═══════════════════════════════════════════════════
 
 def main():
-    global block_new_trades, adapter_counter, \
+    global block_new_trades, adapter_counter, consecutive_stops, \
            RSI_BUY_CURRENT, RSI_SELL_CURRENT
 
     log.info("=" * 54)
@@ -598,6 +657,7 @@ def main():
                 global daily_pnl
                 daily_pnl      = 0.0
                 block_new_trades = False
+                consecutive_stops = 0  # сброс счётчика стопов
                 last_reset_day = today
                 log.info("🌅 Новый день — дневной PnL сброшен, блокировка снята")
                 tg.send_message("🌅 <b>Новый день</b>\nДневной PnL сброшен. Боты продолжают работу.")
@@ -610,14 +670,22 @@ def main():
             # ── RSI адаптация по рынку ─────────────────
             adapt_rsi_thresholds(coins)
 
-            # ── Стратегический адаптер (раз в 3 скана) ─
+            # ── Стратегический адаптер ─────────────────
+            # Быстрая адаптация при 3 последовательных стопах ИЛИ каждые 3 скана
             adapter_counter += 1
-            if adapter_counter % 3 == 0:
+            if consecutive_stops >= 3 or adapter_counter % 3 == 0:
+                if consecutive_stops >= 3:
+                    log.warning(f"⚠️ {consecutive_stops} последовательных стопов → экстренная адаптация")
+                    tg.send_message(f"⚠️ <b>Экстренная адаптация</b>\n{consecutive_stops} стопов подряд — корректирую параметры")
+                
                 result = adapter.adapt(daily_pnl, RSI_BUY_CURRENT, RSI_SELL_CURRENT)
                 block_new_trades   = result["block_new_trades"]
                 RSI_BUY_CURRENT    = result["rsi_buy"]
                 RSI_SELL_CURRENT   = result["rsi_sell"]
                 adapter.notify_if_changed(result)
+                
+                if consecutive_stops >= 3:
+                    consecutive_stops = 0  # сброс после адаптации
 
             # ── Запуск / остановка ботов ───────────────
             for symbol in list(active_bots.keys()):
