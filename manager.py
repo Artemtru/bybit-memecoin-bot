@@ -30,21 +30,21 @@ import strategy_adapter as adapter
 load_dotenv()
 
 # ── Настройки ────────────────────────────────────────
-SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "30"))
-MAX_BOTS          = int(os.getenv("MAX_BOTS",          "3"))
+SCAN_INTERVAL_MIN = int(float(os.getenv("SCAN_INTERVAL_MIN", "30")))
+MAX_BOTS          = int(float(os.getenv("MAX_BOTS",          "3")))
 DAILY_LOSS_LIMIT  = float(os.getenv("DAILY_LOSS_LIMIT","-50"))
-LEVERAGE          = int(os.getenv("LEVERAGE",          "2"))
+LEVERAGE          = int(float(os.getenv("LEVERAGE",          "2")))  # int(float()) — терпит "2.0" из оптимизатора
 QTY_USDT_BASE     = float(os.getenv("QTY_USDT",        "20"))  # базовый размер позиции в USDT
 INTERVAL          = os.getenv("INTERVAL",  "5")
-RSI_PERIOD        = int(os.getenv("RSI_PERIOD", "14"))
-SLEEP_SEC         = int(os.getenv("SLEEP_SEC",  "60"))
+RSI_PERIOD        = int(float(os.getenv("RSI_PERIOD", "14")))
+SLEEP_SEC         = int(float(os.getenv("SLEEP_SEC",  "60")))
 
 # Bollinger Bands
-BB_PERIOD   = int(os.getenv("BB_PERIOD",  "20"))
+BB_PERIOD   = int(float(os.getenv("BB_PERIOD",  "20")))
 BB_STD      = float(os.getenv("BB_STD",   "2.0"))
 
 # ATR
-ATR_PERIOD  = int(os.getenv("ATR_PERIOD", "14"))
+ATR_PERIOD  = int(float(os.getenv("ATR_PERIOD", "14")))
 ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", "2.0"))  # TP = ATR × 2
 ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", "1.0"))  # SL = ATR × 1
 
