@@ -527,7 +527,7 @@ def bot_thread(symbol: str, stop_event: threading.Event):
 
             pos      = get_position(symbol)
             pos_side = pos["side"] if pos else None
-            pos_qty  = pos["size"] if pos else QTY
+            pos_qty  = pos["size"] if pos else None
             pnl      = float(pos["unrealisedPnl"]) if pos else 0.0
 
             log.info(
