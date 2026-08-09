@@ -34,7 +34,7 @@ SCAN_INTERVAL_MIN = int(float(os.getenv("SCAN_INTERVAL_MIN", "30")))
 MAX_BOTS          = int(float(os.getenv("MAX_BOTS",          "3")))
 DAILY_LOSS_LIMIT  = float(os.getenv("DAILY_LOSS_LIMIT","-50"))
 LEVERAGE          = int(float(os.getenv("LEVERAGE",          "2")))  # int(float()) — терпит "2.0" из оптимизатора
-QTY_USDT_BASE     = float(os.getenv("QTY_USDT",        "20"))  # базовый размер позиции в USDT
+QTY_USDT_BASE     = float(os.getenv("QTY_USDT",        "50"))  # базовый размер позиции в USDT (было 20)
 INTERVAL          = os.getenv("INTERVAL",  "5")
 RSI_PERIOD        = int(float(os.getenv("RSI_PERIOD", "14")))
 SLEEP_SEC         = int(float(os.getenv("SLEEP_SEC",  "60")))
@@ -45,15 +45,15 @@ BB_STD      = float(os.getenv("BB_STD",   "2.0"))
 
 # ATR
 ATR_PERIOD  = int(float(os.getenv("ATR_PERIOD", "14")))
-ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", "2.0"))  # TP = ATR × 2
-ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", "1.0"))  # SL = ATR × 1
+ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", "2.5"))  # TP = ATR × 2.5 (было 2.0)
+ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", "1.2"))  # SL = ATR × 1.2 (было 1.0)
 
 # Режим рынка
 SIDEWAYS_ATR_THRESHOLD = float(os.getenv("SIDEWAYS_ATR_THRESHOLD", "0.03"))  # ATR/цена < 3% = боковик
 
 # RSI пороги (адаптируются автоматически)
-RSI_BUY_CURRENT  = float(os.getenv("RSI_BUY",  "45"))
-RSI_SELL_CURRENT = float(os.getenv("RSI_SELL", "55"))
+RSI_BUY_CURRENT  = float(os.getenv("RSI_BUY",  "40"))  # было 45
+RSI_SELL_CURRENT = float(os.getenv("RSI_SELL", "60"))  # было 55
 
 API_KEY    = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
