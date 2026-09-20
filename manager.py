@@ -379,6 +379,7 @@ def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode, 
     coin_data[symbol]["open_price"] = price
     coin_data[symbol]["open_side"]  = side
     coin_data[symbol]["open_mode"]  = mode
+    coin_data[symbol]["open_time"]  = time.time()  # 🔧 FIX: запоминаем время открытия
 
 
 def close_position(symbol, side, qty, pnl=0.0, result="signal", exit_price=None):
@@ -558,21 +559,37 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                 log.info(f"[{symbol}] ⛔ Новые входы заблокированы адаптером")
             elif mode == "sideways":
                 signal, bb_mid, bb_edge = signal_sideways(closes, highs, lows, price, rsi, volumes)
+                
+                # 🔧 FIX: Умный реверс — закрываем противоположный сигнал ТОЛЬКО в плюсе
                 if signal and pos_side and pos_side != signal:
-                    daily_pnl += pnl
-                    close_position(symbol, pos_side, pos_qty, pnl)
-                    time.sleep(1)
-                    pos_side = None
+                    if pnl > 0:
+                        # 🎯 Фиксируем прибыль при противоположном сигнале
+                        log.info(f"[{symbol}] 🎯 Противоположный сигнал + PnL:{pnl:+.4f} → фиксируем прибыль")
+                        daily_pnl += pnl
+                        close_position(symbol, pos_side, pos_qty, pnl)
+                        time.sleep(1)
+                        pos_side = None
+                    else:
+                        log.info(f"[{symbol}] ⏳ Противоположный сигнал, но PnL:{pnl:+.4f} → держим до TP/SL")
+                
                 if signal and pos_side is None:
                     open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct)
 
             else:  # trend
                 signal = signal_trend(rsi)
+                
+                # 🔧 FIX: Умный реверс — закрываем противоположный сигнал ТОЛЬКО в плюсе
                 if signal and pos_side and pos_side != signal:
-                    daily_pnl += pnl
-                    close_position(symbol, pos_side, pos_qty, pnl)
-                    time.sleep(1)
-                    pos_side = None
+                    if pnl > 0:
+                        # 🎯 Фиксируем прибыль при противоположном сигнале
+                        log.info(f"[{symbol}] 🎯 Противоположный сигнал + PnL:{pnl:+.4f} → фиксируем прибыль")
+                        daily_pnl += pnl
+                        close_position(symbol, pos_side, pos_qty, pnl)
+                        time.sleep(1)
+                        pos_side = None
+                    else:
+                        log.info(f"[{symbol}] ⏳ Противоположный сигнал, но PnL:{pnl:+.4f} → держим до TP/SL")
+                
                 if signal and pos_side is None:
                     open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct)
 
