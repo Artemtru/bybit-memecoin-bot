@@ -77,11 +77,11 @@ def calc_rsi_from_klines(symbol, interval="15", period=14, session=None):
 
 
 def scan(
-    min_volume_usdt=500_000,     # минимальный объём 24h в USDT
+    min_volume_usdt=250_000,     # минимальный объём 24h в USDT (смягчено: 500K→250K)
     min_change_pct=3.0,          # минимальное изменение цены за 24h (%)
-    max_change_pct=50.0,         # максимум — слишком памп = опасно
-    rsi_min=25,                  # RSI не ниже (совсем мёртвая зона)
-    rsi_max=75,                  # RSI не выше
+    max_change_pct=30.0,         # максимум — защита от пампов (смягчено: 15%→30%)
+    rsi_min=20,                  # RSI не ниже (смягчено: 25→20)
+    rsi_max=80,                  # RSI не выше (смягчено: 75→80)
     top_n=5,                     # сколько монет вернуть
     session=None,                # shared pybit HTTP session (optional)
 ):

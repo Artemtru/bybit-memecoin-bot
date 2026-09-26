@@ -26,45 +26,56 @@ import telegram_notifier as tg
 import pnl_tracker as tracker
 import analytics
 import strategy_adapter as adapter
-import hermes_brain as brain
+
+# ── AI Integration ────────────────────────────────────────
+try:
+    from hermes_brain import HermesBrain
+    HERMES_ENABLED = os.getenv("HERMES_ENABLED", "0") == "1"
+    if HERMES_ENABLED:
+        brain = HermesBrain()
+        log_ai = logging.getLogger("hermes_brain")
+        log_ai.info("🧠 Hermes Brain initialized")
+    else:
+        brain = None
+        log_ai = None
+except ImportError:
+    HERMES_ENABLED = False
+    brain = None
+    log_ai = None
 
 load_dotenv()
 
 # ── Настройки ────────────────────────────────────────
-SCAN_INTERVAL_MIN = int(os.getenv("SCAN_INTERVAL_MIN", "30"))
-MAX_BOTS          = int(os.getenv("MAX_BOTS",          "3"))
-MAX_POSITIONS     = int(os.getenv("MAX_POSITIONS",     "5"))   # жёсткий лимит позиций
-DAILY_LOSS_LIMIT  = float(os.getenv("DAILY_LOSS_LIMIT","-20"))
-LEVERAGE          = int(os.getenv("LEVERAGE",          "2"))
-MAX_LEVERAGE      = int(os.getenv("MAX_LEVERAGE",      "2"))   # жёсткий лимит плеча
+SCAN_INTERVAL_MIN = int(float(os.getenv("SCAN_INTERVAL_MIN", "30")))
+MAX_BOTS          = int(float(os.getenv("MAX_BOTS",          "3")))
+DAILY_LOSS_LIMIT  = float(os.getenv("DAILY_LOSS_LIMIT","-50"))
+LEVERAGE          = int(float(os.getenv("LEVERAGE",          "2")))  # int(float()) — терпит "2.0" из оптимизатора
+QTY_USDT_BASE     = float(os.getenv("QTY_USDT",        "50"))  # базовый размер позиции в USDT (было 20)
+INTERVAL          = os.getenv("INTERVAL",  "5")
+RSI_PERIOD        = int(float(os.getenv("RSI_PERIOD", "14")))
+SLEEP_SEC         = int(float(os.getenv("SLEEP_SEC",  "60")))
 
-# Гибкие лимиты позиций (AI может менять в диапазоне)
-QTY_USDT          = float(os.getenv("QTY_USDT",        "20"))  # текущий размер позиции
-MIN_POSITION_USDT = float(os.getenv("MIN_POSITION_USDT", "10"))  # минимум
-MAX_POSITION_USDT = float(os.getenv("MAX_POSITION_USDT", "30"))  # максимум
-INTERVAL          = os.getenv("INTERVAL",  "15")
-RSI_PERIOD        = int(os.getenv("RSI_PERIOD", "14"))
-SLEEP_SEC         = int(os.getenv("SLEEP_SEC",  "60"))
+# ── AI Hard Limits (cannot be exceeded by AI) ────────────
+MAX_POSITIONS     = int(os.getenv("MAX_POSITIONS",     "5"))   # жёсткий лимит позиций
+MAX_LEVERAGE      = int(os.getenv("MAX_LEVERAGE",      "2"))   # жёсткий лимит плеча
+MIN_POSITION_USDT = float(os.getenv("MIN_POSITION_USDT", "10"))  # минимум размера позиции
+MAX_POSITION_USDT = float(os.getenv("MAX_POSITION_USDT", "30"))  # максимум размера позиции
 
 # Bollinger Bands
-BB_PERIOD   = int(os.getenv("BB_PERIOD",  "20"))
+BB_PERIOD   = int(float(os.getenv("BB_PERIOD",  "20")))
 BB_STD      = float(os.getenv("BB_STD",   "2.0"))
 
 # ATR
-ATR_PERIOD  = int(os.getenv("ATR_PERIOD", "14"))
-ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", "2.0"))  # TP = ATR × 2
-ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", "1.0"))  # SL = ATR × 1
+ATR_PERIOD  = int(float(os.getenv("ATR_PERIOD", "14")))
+ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", "2.5"))  # TP = ATR × 2.5 (было 2.0)
+ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", "1.2"))  # SL = ATR × 1.2 (было 1.0)
 
 # Режим рынка
 SIDEWAYS_ATR_THRESHOLD = float(os.getenv("SIDEWAYS_ATR_THRESHOLD", "0.03"))  # ATR/цена < 3% = боковик
 
-# ADX
-ADX_PERIOD    = int(os.getenv("ADX_PERIOD", "14"))
-ADX_THRESHOLD = float(os.getenv("ADX_THRESHOLD", "25"))  # ADX < 25 = боковик
-
 # RSI пороги (адаптируются автоматически)
-RSI_BUY_CURRENT  = float(os.getenv("RSI_BUY",  "45"))
-RSI_SELL_CURRENT = float(os.getenv("RSI_SELL", "55"))
+RSI_BUY_CURRENT  = float(os.getenv("RSI_BUY",  "40"))  # было 45
+RSI_SELL_CURRENT = float(os.getenv("RSI_SELL", "60"))  # было 55
 
 API_KEY    = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -90,8 +101,8 @@ stop_flags:  dict[str, threading.Event]  = {}
 daily_pnl:   float = 0.0
 coin_data:   dict[str, dict] = {}
 block_new_trades: bool = False    # блокировка новых входов при просадке
-_pnl_lock = threading.Lock()
 adapter_counter:  int  = 0        # счётчик для запуска адаптации раз в N сканирований
+consecutive_stops: int = 0        # счётчик последовательных стоп-лоссов (для быстрой адаптации)
 STATUS_FILE = "logs/status.json"
 
 
@@ -109,7 +120,8 @@ def get_klines(symbol, interval, limit=150):
     closes = [float(c[4]) for c in candles]
     highs  = [float(c[2]) for c in candles]
     lows   = [float(c[3]) for c in candles]
-    return closes, highs, lows, candles
+    volumes = [float(c[5]) for c in candles]  # добавлен объём
+    return closes, highs, lows, volumes
 
 
 def calc_rsi(closes, period=14):
@@ -167,108 +179,67 @@ def calc_ema(closes, period=20):
     return round(ema, 8)
 
 
-def calc_adx(closes, highs, lows, period=14):
-    """Average Directional Index — сила тренда. ADX < 25 = боковик, > 25 = тренд."""
-    if len(closes) < period * 2:
-        return None
-    plus_dm, minus_dm, tr_list = [], [], []
-    for i in range(1, len(closes)):
-        high_diff = highs[i] - highs[i-1]
-        low_diff = lows[i-1] - lows[i]
-        plus_dm.append(max(high_diff, 0) if high_diff > low_diff else 0)
-        minus_dm.append(max(low_diff, 0) if low_diff > high_diff else 0)
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        tr_list.append(tr)
-    # Smooth with Wilder's method
-    smooth_tr = sum(tr_list[:period])
-    smooth_plus = sum(plus_dm[:period])
-    smooth_minus = sum(minus_dm[:period])
-    dx_list = []
-    for i in range(period, len(tr_list)):
-        smooth_tr = smooth_tr - smooth_tr / period + tr_list[i]
-        smooth_plus = smooth_plus - smooth_plus / period + plus_dm[i]
-        smooth_minus = smooth_minus - smooth_minus / period + minus_dm[i]
-        if smooth_tr == 0:
-            continue
-        plus_di = 100 * smooth_plus / smooth_tr
-        minus_di = 100 * smooth_minus / smooth_tr
-        di_sum = plus_di + minus_di
-        if di_sum == 0:
-            continue
-        dx = 100 * abs(plus_di - minus_di) / di_sum
-        dx_list.append(dx)
-    if len(dx_list) < period:
-        return None
-    adx = sum(dx_list[:period]) / period
-    for dx in dx_list[period:]:
-        adx = (adx * (period - 1) + dx) / period
-    return round(adx, 2)
-
-
-def calc_volume_confirmation(candles, period=20):
-    """Проверить что текущий объём > 1.5x от среднего за period свечей."""
-    if len(candles) < period:
-        return False, 0, 0
-    volumes = [float(c[5]) for c in candles]  # index 5 = volume
-    avg_vol = sum(volumes[-period:]) / period
-    current_vol = volumes[-1]
-    ratio = current_vol / avg_vol if avg_vol > 0 else 0
-    return ratio >= 1.5, round(ratio, 2), round(avg_vol, 2)
-
-
 def detect_market_mode(closes, highs, lows, price):
     """
     Определяет режим рынка:
       'sideways' — боковик (ATR/цена мала, EMA50 и EMA20 рядом)
       'trend'    — тренд
 
-    Возвращает (mode, atr, atr_pct, adx)
+    Возвращает (mode, atr, atr_pct)
     """
     atr = calc_atr(closes, highs, lows, ATR_PERIOD)
     if atr is None:
-        return "trend", None, None, None
+        return "trend", None, None
 
     atr_pct = atr / price  # относительный ATR
-
-    adx = calc_adx(closes, highs, lows, ADX_PERIOD)
 
     ema20 = calc_ema(closes, 20)
     ema50 = calc_ema(closes, 50)
 
     if ema20 is None or ema50 is None:
-        mode = "sideways" if (adx is not None and adx < ADX_THRESHOLD) else ("sideways" if atr_pct < SIDEWAYS_ATR_THRESHOLD else "trend")
-        return mode, atr, round(atr_pct * 100, 2), adx
+        mode = "sideways" if atr_pct < SIDEWAYS_ATR_THRESHOLD else "trend"
+        return mode, atr, round(atr_pct * 100, 2)
 
     ema_diff_pct = abs(ema20 - ema50) / price
 
-    if adx is not None:
-        mode = "sideways" if adx < ADX_THRESHOLD else "trend"
+    # Боковик: ATR небольшой И EMA20 и EMA50 близко друг к другу
+    if atr_pct < SIDEWAYS_ATR_THRESHOLD and ema_diff_pct < 0.02:
+        mode = "sideways"
     else:
-        mode = "sideways" if atr_pct < SIDEWAYS_ATR_THRESHOLD and ema_diff_pct < 0.02 else "trend"
+        mode = "trend"
 
-    return mode, atr, round(atr_pct * 100, 2), adx
+    return mode, atr, round(atr_pct * 100, 2)
 
 
 # ═══════════════════════════════════════════════════
 #   ТОРГОВЫЕ СИГНАЛЫ
 # ═══════════════════════════════════════════════════
 
-def signal_sideways(closes, highs, lows, price, rsi):
+def signal_sideways(closes, highs, lows, price, rsi, volumes=None):
     """
-    Стратегия для боковика — Bollinger Bands + RSI-фильтр.
+    Стратегия для боковика — Bollinger Bands + RSI-фильтр + объёмный фильтр.
 
-    Long:  цена пробила нижнюю полосу BB + RSI < 50 (не в зоне перекупленности)
-    Short: цена пробила верхнюю полосу BB + RSI > 50
+    Long:  цена пробила нижнюю полосу BB + RSI < 50 + всплеск объёма
+    Short: цена пробила верхнюю полосу BB + RSI > 50 + всплеск объёма
+    
+    volumes: опциональный массив объёмов для фильтрации
     """
     mid, upper, lower = calc_bollinger(closes, BB_PERIOD, BB_STD)
     if mid is None:
         return None, None, None
 
     prev_close = closes[-2]
+    
+    # Объёмный фильтр (если доступен)
+    volume_confirmed = True
+    if volumes and len(volumes) >= 20:
+        avg_volume = sum(volumes[-20:-1]) / 19  # средний объём за 19 периодов
+        current_volume = volumes[-1]
+        volume_confirmed = current_volume > avg_volume * 1.3  # всплеск на 30%+
 
-    if prev_close <= lower and price > lower and rsi < 55:
+    if prev_close <= lower and price > lower and rsi < 55 and volume_confirmed:
         return "Buy", mid, lower   # Long: отскок от нижней полосы
-    if prev_close >= upper and price < upper and rsi > 45:
+    if prev_close >= upper and price < upper and rsi > 45 and volume_confirmed:
         return "Sell", mid, upper  # Short: отскок от верхней полосы
 
     return None, None, None
@@ -315,6 +286,27 @@ def calc_qty(price: float, qty_usdt: float, qty_step: float, min_qty: float) -> 
     return str(round(result, precision))
 
 
+def calc_adaptive_qty(price: float, atr_pct: float, qty_step: float, min_qty: float) -> str:
+    """
+    Адаптивный размер позиции: больше волатильность → меньше риск.
+    
+    Формула: qty_usdt = QTY_USDT_BASE / (1 + atr_pct * 10)
+    Пример: ATR=2% → множитель 1.2 → позиция 20/1.2 = 16.6 USDT
+            ATR=5% → множитель 1.5 → позиция 20/1.5 = 13.3 USDT
+    """
+    if atr_pct is None or atr_pct <= 0:
+        atr_pct = 0.02  # дефолт 2%
+    
+    # Снижаем размер при высокой волатильности
+    volume_mult = 1 / (1 + atr_pct * 10)
+    qty_usdt = QTY_USDT_BASE * volume_mult
+    
+    # Минимум 5 USDT (требование Bybit)
+    qty_usdt = max(qty_usdt, 5.0)
+    
+    return calc_qty(price, qty_usdt, qty_step, min_qty)
+
+
 def round_price(price, tick_size):
     precision = len(str(tick_size).rstrip("0").split(".")[-1]) if "." in str(tick_size) else 0
     return round(round(price / tick_size) * tick_size, precision)
@@ -345,21 +337,47 @@ def set_leverage(symbol):
         pass
 
 
-def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode):
+def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode, atr_pct=None):
     """
-    Открыть позицию с размером в USDT и адаптивным TP/SL.
-    Защита от нулевого TP/SL при малом ATR.
+    Открыть позицию с адаптивным размером и защитой от фандинга.
+    Использует Limit IOC для защиты от проскальзывания.
     """
-    # Валидация размера позиции в пределах лимитов
-    position_usdt = max(MIN_POSITION_USDT, min(QTY_USDT, MAX_POSITION_USDT))
-    if position_usdt != QTY_USDT:
-        log.warning(
-            f"Position size adjusted: {QTY_USDT} → {position_usdt} USDT "
-            f"(limits: {MIN_POSITION_USDT}-{MAX_POSITION_USDT})"
-        )
+    # 0. AI Veto check (if enabled)
+    if HERMES_ENABLED and brain:
+        try:
+            position_usdt = (float(calc_adaptive_qty(price, atr_pct or 0.02, qty_step, min_qty)) * price) if atr_pct else (QTY_USDT_BASE)
+            # Enforce hard limits
+            position_usdt = max(MIN_POSITION_USDT, min(position_usdt, MAX_POSITION_USDT))
+            
+            trade_allowed, reason = brain.should_trade(
+                symbol=symbol,
+                side="long" if side == "Buy" else "short",
+                current_price=price,
+                position_usdt=position_usdt,
+                leverage=LEVERAGE,
+                include_news=True  # анализ новостей перед открытием
+            )
+            
+            if not trade_allowed:
+                log.warning(f"[{symbol}] 🧠 AI VETO: {reason}")
+                return
+            else:
+                log.info(f"[{symbol}] 🧠 AI approved: {reason}")
+        except Exception as e:
+            log.error(f"[{symbol}] ⚠️ AI check failed: {e} — продолжаем без AI")
     
-    # Рассчитываем qty в монетах из валидированного position_usdt
-    qty = calc_qty(price, position_usdt, qty_step, min_qty)
+    # 1. Проверка фандинга
+    try:
+        ticker = session.get_tickers(category="linear", symbol=symbol)
+        funding_rate = float(ticker["result"]["list"][0]["fundingRate"])
+        if abs(funding_rate) > 0.0005:  # > 0.05% фандинг
+            log.warning(f"[{symbol}] Фандинг высокий ({funding_rate:.4%}), пропускаем вход")
+            return
+    except Exception as e:
+        log.warning(f"[{symbol}] Не удалось проверить фандинг: {e}")
+    
+    # 2. Адаптивный размер позиции
+    qty = calc_adaptive_qty(price, atr_pct or 0.02, qty_step, min_qty)
 
     # Минимальный шаг цены для TP/SL — не менее 0.5% от цены
     min_move = price * 0.005
@@ -383,12 +401,20 @@ def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode):
         log.warning(f"[{symbol}] Некорректные TP={tp} SL={sl} — пропускаем сделку")
         return
 
+    # 3. Limit IOC ордер для защиты от проскальзывания (±0.3% толерантность)
+    if side == "Buy":
+        limit_price = round_price(price * 1.003, tick_size)  # +0.3% для покупки
+    else:
+        limit_price = round_price(price * 0.997, tick_size)  # -0.3% для продажи
+    
+    estimated_usdt = float(qty) * price
     log.info(f"[{symbol}] Открываю {'LONG' if side=='Buy' else 'SHORT'} | "
-             f"qty:{qty} (~{position_usdt}$) | TP:{tp} SL:{sl} | режим:{mode}")
+             f"qty:{qty} (~{estimated_usdt:.1f}$) | Limit:{limit_price} | TP:{tp} SL:{sl} | режим:{mode}")
 
     session.place_order(
         category="linear", symbol=symbol,
-        side=side, orderType="Market", qty=qty,
+        side=side, orderType="Limit", qty=qty,
+        price=str(limit_price), timeInForce="IOC",  # Immediate-Or-Cancel
         takeProfit=str(tp), stopLoss=str(sl),
         tpTriggerBy="MarkPrice", slTriggerBy="MarkPrice",
     )
@@ -399,9 +425,12 @@ def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode):
     coin_data[symbol]["open_price"] = price
     coin_data[symbol]["open_side"]  = side
     coin_data[symbol]["open_mode"]  = mode
+    coin_data[symbol]["open_time"]  = time.time()  # 🔧 FIX: запоминаем время открытия
 
 
 def close_position(symbol, side, qty, pnl=0.0, result="signal", exit_price=None):
+    global consecutive_stops
+    
     cancel_orders(symbol)
     close_side = "Sell" if side == "Buy" else "Buy"
     session.place_order(
@@ -411,6 +440,13 @@ def close_position(symbol, side, qty, pnl=0.0, result="signal", exit_price=None)
     )
     log.info(f"[{symbol}] Позиция закрыта | PnL:{pnl:+.4f}")
     tg.notify_position_closed(symbol, side, pnl)
+    
+    # Счётчик последовательных стопов
+    if pnl < 0:
+        consecutive_stops += 1
+    else:
+        consecutive_stops = 0  # сброс при прибыльной сделке
+    
     # Записать сделку в базу
     tracker.record_trade(
         symbol=symbol,
@@ -530,34 +566,25 @@ def bot_thread(symbol: str, stop_event: threading.Event):
 
     while not stop_event.is_set():
         try:
-            closes, highs, lows, candles = get_klines(symbol, INTERVAL)
+            closes, highs, lows, volumes = get_klines(symbol, INTERVAL)
             price = closes[-1]
             rsi   = calc_rsi(closes, RSI_PERIOD)
             atr   = calc_atr(closes, highs, lows, ATR_PERIOD)
-            mode, atr_val, atr_pct, adx = detect_market_mode(closes, highs, lows, price)
-            vol_ok, vol_ratio, avg_vol = calc_volume_confirmation(candles)
-
-            # Multi-timeframe: 1h RSI для подтверждения направления
-            try:
-                closes_1h, _, _, _ = get_klines(symbol, "60", limit=50)
-                rsi_1h = calc_rsi(closes_1h, RSI_PERIOD)
-            except Exception:
-                rsi_1h = 50  # neutral if can't fetch
+            mode, atr_val, atr_pct = detect_market_mode(closes, highs, lows, price)
 
             pos      = get_position(symbol)
             pos_side = pos["side"] if pos else None
-            pos_qty  = pos["size"] if pos else '0'
+            pos_qty  = pos["size"] if pos else None
             pnl      = float(pos["unrealisedPnl"]) if pos else 0.0
 
             log.info(
-                f"[{symbol}] Цена:{price:.6f} RSI:{rsi} ATR%:{atr_pct} ADX:{adx} "
-                f"Режим:{mode} Vol:{vol_ratio}x Поз:{pos_side or 'нет'} PnL:{pnl:+.4f}"
+                f"[{symbol}] Цена:{price:.6f} RSI:{rsi} ATR%:{atr_pct} "
+                f"Режим:{mode} Поз:{pos_side or 'нет'} PnL:{pnl:+.4f}"
             )
 
             coin_data[symbol] = {
                 "price": price, "rsi": rsi,
-                "atr_pct": atr_pct, "adx": adx, "mode": mode,
-                "vol_ratio": vol_ratio,
+                "atr_pct": atr_pct, "mode": mode,
                 "position": pos_side or "нет", "pnl": pnl,
             }
             save_status()
@@ -577,66 +604,40 @@ def bot_thread(symbol: str, stop_event: threading.Event):
             if block_new_trades and not pos_side:
                 log.info(f"[{symbol}] ⛔ Новые входы заблокированы адаптером")
             elif mode == "sideways":
-                signal, bb_mid, bb_edge = signal_sideways(closes, highs, lows, price, rsi)
+                signal, bb_mid, bb_edge = signal_sideways(closes, highs, lows, price, rsi, volumes)
+                
+                # 🔧 FIX: Умный реверс — закрываем противоположный сигнал ТОЛЬКО в плюсе
                 if signal and pos_side and pos_side != signal:
-                    with _pnl_lock:
+                    if pnl > 0:
+                        # 🎯 Фиксируем прибыль при противоположном сигнале
+                        log.info(f"[{symbol}] 🎯 Противоположный сигнал + PnL:{pnl:+.4f} → фиксируем прибыль")
                         daily_pnl += pnl
-                    close_position(symbol, pos_side, pos_qty, pnl)
-                    time.sleep(1)
-                    pos_side = None
-                if signal and pos_side is None:
-                    mtf_ok = (signal == "Buy" and rsi_1h < 60) or (signal == "Sell" and rsi_1h > 40)
-                    if vol_ok and mtf_ok:
-                        # Hermes Brain — финальная проверка через LLM (с анализом новостей)
-                        brain_ok, brain_reason = brain.should_trade(
-                            symbol=symbol, signal=signal, price=price,
-                            rsi=rsi, adx=adx, atr_pct=atr_pct,
-                            mode=mode, vol_ratio=vol_ratio,
-                            market_context=f"1h RSI: {rsi_1h:.1f}, Daily PnL: {daily_pnl:+.2f} USDT",
-                            include_news=True,  # включить анализ новостей
-                        )
-                        if brain_ok:
-                            open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode)
-                        else:
-                            log.info(f"[{symbol}] 🧠 Hermes отклонил: {brain_reason}")
+                        close_position(symbol, pos_side, pos_qty, pnl)
+                        time.sleep(1)
+                        pos_side = None
                     else:
-                        reasons = []
-                        if not vol_ok:
-                            reasons.append(f"объём {vol_ratio}x < 1.5x")
-                        if not mtf_ok:
-                            reasons.append(f"1h RSI={rsi_1h} не подтверждает")
-                        log.info(f"[{symbol}] Сигнал {signal} отклонён — {', '.join(reasons)}")
+                        log.info(f"[{symbol}] ⏳ Противоположный сигнал, но PnL:{pnl:+.4f} → держим до TP/SL")
+                
+                if signal and pos_side is None:
+                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct)
 
             else:  # trend
                 signal = signal_trend(rsi)
+                
+                # 🔧 FIX: Умный реверс — закрываем противоположный сигнал ТОЛЬКО в плюсе
                 if signal and pos_side and pos_side != signal:
-                    with _pnl_lock:
+                    if pnl > 0:
+                        # 🎯 Фиксируем прибыль при противоположном сигнале
+                        log.info(f"[{symbol}] 🎯 Противоположный сигнал + PnL:{pnl:+.4f} → фиксируем прибыль")
                         daily_pnl += pnl
-                    close_position(symbol, pos_side, pos_qty, pnl)
-                    time.sleep(1)
-                    pos_side = None
-                if signal and pos_side is None:
-                    mtf_ok = (signal == "Buy" and rsi_1h < 60) or (signal == "Sell" and rsi_1h > 40)
-                    if vol_ok and mtf_ok:
-                        # Hermes Brain — финальная проверка через LLM (с анализом новостей)
-                        brain_ok, brain_reason = brain.should_trade(
-                            symbol=symbol, signal=signal, price=price,
-                            rsi=rsi, adx=adx, atr_pct=atr_pct,
-                            mode=mode, vol_ratio=vol_ratio,
-                            market_context=f"1h RSI: {rsi_1h:.1f}, Daily PnL: {daily_pnl:+.2f} USDT",
-                            include_news=True,  # включить анализ новостей
-                        )
-                        if brain_ok:
-                            open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode)
-                        else:
-                            log.info(f"[{symbol}] 🧠 Hermes отклонил: {brain_reason}")
+                        close_position(symbol, pos_side, pos_qty, pnl)
+                        time.sleep(1)
+                        pos_side = None
                     else:
-                        reasons = []
-                        if not vol_ok:
-                            reasons.append(f"объём {vol_ratio}x < 1.5x")
-                        if not mtf_ok:
-                            reasons.append(f"1h RSI={rsi_1h} не подтверждает")
-                        log.info(f"[{symbol}] Сигнал {signal} отклонён — {', '.join(reasons)}")
+                        log.info(f"[{symbol}] ⏳ Противоположный сигнал, но PnL:{pnl:+.4f} → держим до TP/SL")
+                
+                if signal and pos_side is None:
+                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct)
 
             if not signal:
                 log.info(f"[{symbol}] Сигнала нет, ждём...")
@@ -699,14 +700,13 @@ def print_status():
 # ═══════════════════════════════════════════════════
 
 def main():
-    global block_new_trades, adapter_counter, \
+    global block_new_trades, adapter_counter, consecutive_stops, \
            RSI_BUY_CURRENT, RSI_SELL_CURRENT
 
     log.info("=" * 54)
     log.info("  🚀 MANAGER ЗАПУЩЕН (Адаптивная стратегия)")
-    log.info(f"  BB{BB_PERIOD}/{BB_STD}σ + RSI + ATR{ATR_PERIOD} + ADX{ADX_PERIOD}(<{ADX_THRESHOLD}) | TP×{ATR_TP_MULT} SL×{ATR_SL_MULT}")
+    log.info(f"  BB{BB_PERIOD}/{BB_STD}σ + RSI + ATR{ATR_PERIOD} | TP×{ATR_TP_MULT} SL×{ATR_SL_MULT}")
     log.info(f"  Макс ботов: {MAX_BOTS} | Лимит потерь: {DAILY_LOSS_LIMIT} USDT")
-    log.info(f"  Hermes Brain: {'ON' if brain.HERMES_ENABLED else 'OFF'}")
     log.info("=" * 54)
     tg.notify_manager_started(MAX_BOTS, SCAN_INTERVAL_MIN)
 
@@ -718,22 +718,9 @@ def main():
             today = datetime.now().strftime("%Y-%m-%d")
             if today != last_reset_day:
                 global daily_pnl
-                # 🧠 Hermes Brain — ежедневный отчёт перед сбросом
-                try:
-                    today_stats = analytics.today()
-                    if today_stats["count"] > 0:
-                        summary = brain.daily_summary(
-                            trades_today=today_stats["count"],
-                            total_pnl=today_stats["pnl"],
-                            by_symbol=today_stats.get("by_symbol", {}),
-                        )
-                        if summary:
-                            tg.send_message(f"🧠 <b>Hermes — анализ дня</b>\n\n{summary}")
-                except Exception as e:
-                    log.warning(f"Brain daily summary error: {e}")
-                with _pnl_lock:
-                    daily_pnl      = 0.0
+                daily_pnl      = 0.0
                 block_new_trades = False
+                consecutive_stops = 0  # сброс счётчика стопов
                 last_reset_day = today
                 log.info("🌅 Новый день — дневной PnL сброшен, блокировка снята")
                 tg.send_message("🌅 <b>Новый день</b>\nДневной PnL сброшен. Боты продолжают работу.")
@@ -746,14 +733,22 @@ def main():
             # ── RSI адаптация по рынку ─────────────────
             adapt_rsi_thresholds(coins)
 
-            # ── Стратегический адаптер (раз в 3 скана) ─
+            # ── Стратегический адаптер ─────────────────
+            # Быстрая адаптация при 3 последовательных стопах ИЛИ каждые 3 скана
             adapter_counter += 1
-            if adapter_counter % 3 == 0:
+            if consecutive_stops >= 3 or adapter_counter % 3 == 0:
+                if consecutive_stops >= 3:
+                    log.warning(f"⚠️ {consecutive_stops} последовательных стопов → экстренная адаптация")
+                    tg.send_message(f"⚠️ <b>Экстренная адаптация</b>\n{consecutive_stops} стопов подряд — корректирую параметры")
+                
                 result = adapter.adapt(daily_pnl, RSI_BUY_CURRENT, RSI_SELL_CURRENT)
                 block_new_trades   = result["block_new_trades"]
                 RSI_BUY_CURRENT    = result["rsi_buy"]
                 RSI_SELL_CURRENT   = result["rsi_sell"]
                 adapter.notify_if_changed(result)
+                
+                if consecutive_stops >= 3:
+                    consecutive_stops = 0  # сброс после адаптации
 
             # ── Запуск / остановка ботов ───────────────
             for symbol in list(active_bots.keys()):

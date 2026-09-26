@@ -1,0 +1,36 @@
+name: 🚀 Deploy to VPS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy Bot
+    steps:
+      - name: 📦 Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "🔄 Updating bybit-memecoin-bot..."
+            cd /root/bybit-memecoin-bot
+            git pull origin main
+            if systemctl list-unit-files | grep -q "popcat-bot.service"; then
+              echo "🔄 Migrating popcat-bot → memecoin-bot..."
+              systemctl stop popcat-bot telegram-bot 2>/dev/null || true
+              mv /etc/systemd/system/popcat-bot.service /etc/systemd/system/memecoin-bot.service 2>/dev/null || true
+              systemctl daemon-reload
+              systemctl enable memecoin-bot telegram-bot 2>/dev/null || true
+            fi
+            echo "♻️  Restarting services..."
+            systemctl restart memecoin-bot telegram-bot
+            echo "✅ Status:"
+            systemctl status memecoin-bot --no-pager -l | head -10
+            echo "📊 Recent activity:"
+            tail -5 /root/bybit-memecoin-bot/logs/manager_$(date +%Y%m%d).log 2>/dev/null || echo "No logs yet"
+            echo "🎉 Deploy complete!"

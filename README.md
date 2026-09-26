@@ -64,14 +64,14 @@ python telegram_commands.py
 
 ```bash
 # Основной бот
-sudo nano /etc/systemd/system/popcat-bot.service
+sudo nano /etc/systemd/system/memecoin-bot.service
 
 # Telegram-бот
 sudo nano /etc/systemd/system/telegram-bot.service
 
 sudo systemctl daemon-reload
-sudo systemctl enable popcat-bot telegram-bot
-sudo systemctl start popcat-bot telegram-bot
+sudo systemctl enable memecoin-bot telegram-bot
+sudo systemctl start memecoin-bot telegram-bot
 ```
 
 Пример `.service` файла:

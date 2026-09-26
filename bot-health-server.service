@@ -1,0 +1,14 @@
+[Unit]
+Description=Bybit Bot Health Monitor HTTP Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bybit-memecoin-bot
+ExecStart=/root/bybit-memecoin-bot/venv/bin/python3 scripts/bot_health_server.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
