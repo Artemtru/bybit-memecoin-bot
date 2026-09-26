@@ -12,30 +12,39 @@ from pybit.unified_trading import HTTP
 
 load_dotenv()
 
-session = HTTP(
-    testnet=False,
-    api_key=os.getenv("BYBIT_API_KEY"),
-    api_secret=os.getenv("BYBIT_API_SECRET"),
-)
+# Module-level session (used as fallback when no session is passed to scan())
+_default_session = None
+
+def _get_session():
+    """Lazy-init module-level session (so import alone doesn't require keys)."""
+    global _default_session
+    if _default_session is None:
+        _default_session = HTTP(
+            testnet=False,
+            api_key=os.getenv("BYBIT_API_KEY"),
+            api_secret=os.getenv("BYBIT_API_SECRET"),
+        )
+    return _default_session
 
 # ── Известные мемкоины на Bybit фьючерсах ───────
+# Narrowed from 36 to the 12 most liquid / established memecoins.
+# Illiquid tails produced false signals and slippage; focusing on
+# high-volume pairs improves fill quality and signal reliability.
 MEME_KEYWORDS = [
-    "POPCAT", "BONK", "WIF", "PEPE", "DOGE", "SHIB",
-    "FLOKI", "MEME", "NEIRO", "COW", "GOAT", "PNUT",
-    "ACT", "TURBO", "BRETT", "MOG", "BOME", "PONKE",
-    "SLERF", "BOOK", "MEW", "GIGA", "MOODENG", "HMSTR",
-    "CATI", "DOGS", "MAJOR", "NOT", "LADYS", "COQ",
-    "MYRO", "PURR", "SELFIE", "FWOG", "SUNDOG",
+    "DOGE", "SHIB", "PEPE", "FLOKI", "BONK", "WIF",
+    "MEME", "NEIRO", "POPCAT", "TRUMP", "BRETT", "NOT",
 ]
 
-def get_all_tickers():
+def get_all_tickers(session=None):
     """Получить все фьючерсные тикеры с Bybit"""
+    session = session or _get_session()
     resp = session.get_tickers(category="linear")
     return resp["result"]["list"]
 
 
-def calc_rsi_from_klines(symbol, interval="15", period=14):
+def calc_rsi_from_klines(symbol, interval="15", period=14, session=None):
     """Вычислить RSI для символа"""
+    session = session or _get_session()
     try:
         resp = session.get_kline(
             category="linear",
@@ -74,14 +83,20 @@ def scan(
     rsi_min=25,                  # RSI не ниже (совсем мёртвая зона)
     rsi_max=75,                  # RSI не выше
     top_n=5,                     # сколько монет вернуть
+    session=None,                # shared pybit HTTP session (optional)
 ):
     """
     Сканирует все фьючерсы Bybit, фильтрует мемкоины
     по объёму, волатильности и RSI.
     Возвращает список словарей с данными монет.
+
+    Args:
+        session: pybit HTTP session to reuse (e.g. from manager).
+                 Falls back to creating its own if not provided.
     """
+    session = session or _get_session()
     print("🔍 Сканирую рынок Bybit...")
-    tickers = get_all_tickers()
+    tickers = get_all_tickers(session=session)
 
     candidates = []
     for t in tickers:
@@ -124,7 +139,7 @@ def scan(
     # Получаем RSI для топ-кандидатов и финально фильтруем
     result = []
     for coin in candidates[:top_n * 3]:   # берём с запасом
-        rsi = calc_rsi_from_klines(coin["symbol"])
+        rsi = calc_rsi_from_klines(coin["symbol"], session=session)
         coin["rsi"] = rsi
 
         if rsi is None:

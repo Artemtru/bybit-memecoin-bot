@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 
 from scanner import scan
 import analytics
+import telegram_ai_control
 
 load_dotenv()
 
@@ -39,6 +40,26 @@ def send_message(text: str, chat_id=None):
     requests.post(
         f"{API_URL}/sendMessage",
         json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+        timeout=10,
+    )
+
+
+def send_message_with_buttons(text: str, chat_id, buttons: list):
+    """
+    Отправить сообщение с Inline кнопками.
+    
+    buttons: [{"text": "Да", "callback_data": "confirm"}, ...]
+    """
+    chat_id = chat_id or TELEGRAM_CHAT_ID
+    keyboard = {"inline_keyboard": [buttons]}
+    requests.post(
+        f"{API_URL}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": keyboard
+        },
         timeout=10,
     )
 
@@ -146,6 +167,12 @@ def format_help():
         "/quarterly — отчёт за квартал\n"
         "/yearly — отчёт за год\n"
         "/alltime — отчёт за всё время\n\n"
+        "<b>AI Управление:</b>\n"
+        "/ask <команда> — управление через AI\n"
+        "Примеры:\n"
+        "  /ask Закрой все позиции\n"
+        "  /ask Увеличь размер до 25 USDT\n"
+        "  /ask Какие монеты перспективны?\n\n"
         "/help — этот список"
     )
 
@@ -185,6 +212,42 @@ def handle_update(update: dict):
         send_message(analytics.format_report(analytics.all_time(), "Всё время"), chat_id)
     elif text == "/help" or text == "/start":
         send_message(format_help(), chat_id)
+    elif text.startswith("/ask "):
+        # AI команда
+        user_command = text[5:].strip()  # убираем "/ask "
+        if not user_command:
+            send_message("❌ Использование: /ask <команда>\nПример: /ask Закрой все позиции", chat_id)
+            return
+
+        send_message("🤖 Обрабатываю команду через AI...", chat_id)
+        
+        # Получаем текущий статус бота
+        bot_state = read_status() or {}
+        
+        # Обрабатываем через AI агента
+        result = telegram_ai_control.process_command(user_command, bot_state)
+        
+        if not result.get("success"):
+            send_message(f"❌ {result.get('error', 'Неизвестная ошибка')}", chat_id)
+            return
+        
+        explanation = result.get("explanation", "")
+        needs_confirm = result.get("needs_confirmation", False)
+        
+        if needs_confirm:
+            # Отправляем с кнопками подтверждения
+            send_message_with_buttons(
+                f"⚠️ Требуется подтверждение:\n\n{explanation}\n\nПодтвердить?",
+                chat_id,
+                [
+                    {"text": "✅ Да", "callback_data": f"confirm_{result['action']}"},
+                    {"text": "❌ Нет", "callback_data": "cancel"}
+                ]
+            )
+        else:
+            # Выполняем сразу
+            send_message(f"✅ {explanation}", chat_id)
+            # TODO: execute_action() когда manager.py будет готов
     else:
         send_message("Неизвестная команда. Используй /help", chat_id)
 
