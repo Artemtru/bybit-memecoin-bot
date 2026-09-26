@@ -35,6 +35,38 @@ STATUS_FILE      = "logs/status.json"
 API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 
+def setup_commands():
+    """Регистрация команд в меню Telegram через setMyCommands API"""
+    commands = [
+        {"command": "status", "description": "📊 Общий статус системы"},
+        {"command": "coins", "description": "🪙 Детали по каждой монете"},
+        {"command": "pnl", "description": "💸 Текущий PnL за день"},
+        {"command": "top", "description": "🔍 Свежий скан топ-монет"},
+        {"command": "daily", "description": "📈 Отчёт за сегодня"},
+        {"command": "weekly", "description": "📊 Отчёт за неделю"},
+        {"command": "monthly", "description": "📅 Отчёт за месяц"},
+        {"command": "quarterly", "description": "🗓 Отчёт за квартал"},
+        {"command": "yearly", "description": "📆 Отчёт за год"},
+        {"command": "alltime", "description": "⏳ Отчёт за всё время"},
+        {"command": "ask", "description": "🤖 Управление через AI (пример: /ask Закрой все позиции)"},
+        {"command": "help", "description": "❓ Список всех команд"},
+    ]
+    
+    try:
+        resp = requests.post(
+            f"{API_URL}/setMyCommands",
+            json={"commands": commands},
+            timeout=10
+        )
+        result = resp.json()
+        if result.get("ok"):
+            print("✅ Команды зарегистрированы в Telegram меню")
+        else:
+            print(f"⚠️ Не удалось зарегистрировать команды: {result}")
+    except Exception as e:
+        print(f"⚠️ Ошибка регистрации команд: {e}")
+
+
 def send_message(text: str, chat_id=None):
     chat_id = chat_id or TELEGRAM_CHAT_ID
     requests.post(
@@ -254,6 +286,10 @@ def handle_update(update: dict):
 
 def main():
     print("🤖 Telegram command bot запущен. Жду команды...")
+    
+    # Регистрируем команды в меню Telegram
+    setup_commands()
+    
     offset = None
 
     while True:
