@@ -29,19 +29,22 @@ import strategy_adapter as adapter
 
 # ── AI Integration ────────────────────────────────────────
 try:
-    from hermes_brain import HermesBrain
+    import hermes_brain as brain
+    import ai_strategy_manager
     HERMES_ENABLED = os.getenv("HERMES_ENABLED", "0") == "1"
     if HERMES_ENABLED:
-        brain = HermesBrain()
         log_ai = logging.getLogger("hermes_brain")
-        log_ai.info("🧠 Hermes Brain initialized")
+        log_ai.setLevel(logging.INFO)
+        strategy_manager = ai_strategy_manager.create_manager(brain)
     else:
         brain = None
         log_ai = None
+        strategy_manager = None
 except ImportError:
     HERMES_ENABLED = False
     brain = None
     log_ai = None
+    strategy_manager = None
 
 load_dotenv()
 
@@ -733,13 +736,50 @@ def main():
             # ── RSI адаптация по рынку ─────────────────
             adapt_rsi_thresholds(coins)
 
+            # ── AI Strategy Manager (2 раза в день) ────
+            if HERMES_ENABLED and strategy_manager:
+                # Формируем market context из текущего состояния
+                market_context = {
+                    "daily_pnl": daily_pnl,
+                    "active_bots": len([t for t in active_bots.values() if t.is_alive()]),
+                    "max_bots": MAX_BOTS,
+                    "recent_coins": [c["symbol"] for c in coins],
+                    "avg_volatility": sum(c.get("atr_pct", 0.02) for c in coins) / len(coins) if coins else 0.02,
+                    "market_trend": "volatile" if any(c.get("atr_pct", 0) > 0.05 for c in coins) else "stable",
+                }
+                
+                current_params = {
+                    "RSI_BUY": RSI_BUY_CURRENT,
+                    "RSI_SELL": RSI_SELL_CURRENT,
+                    "QTY_USDT": QTY_USDT_BASE,
+                    "MAX_BOTS": MAX_BOTS,
+                    "SCAN_INTERVAL_MIN": SCAN_INTERVAL_MIN,
+                }
+                
+                adjusted, new_params, reason = strategy_manager.adjust_strategy(
+                    current_params, market_context
+                )
+                
+                if adjusted:
+                    # Применяем новые параметры
+                    RSI_BUY_CURRENT = new_params.get("RSI_BUY", RSI_BUY_CURRENT)
+                    RSI_SELL_CURRENT = new_params.get("RSI_SELL", RSI_SELL_CURRENT)
+                    # QTY_USDT и MAX_BOTS можно обновить только через .env reload
+                    # Уведомляем в Telegram
+                    tg.send_message(
+                        f"🧠 <b>AI Strategy Adjustment</b>\\n"
+                        f"{reason}\\n\\n"
+                        f"RSI: {RSI_BUY_CURRENT}/{RSI_SELL_CURRENT}\\n"
+                        f"Suggested QTY: {new_params.get('QTY_USDT', QTY_USDT_BASE)} USDT"
+                    )
+
             # ── Стратегический адаптер ─────────────────
             # Быстрая адаптация при 3 последовательных стопах ИЛИ каждые 3 скана
             adapter_counter += 1
             if consecutive_stops >= 3 or adapter_counter % 3 == 0:
                 if consecutive_stops >= 3:
                     log.warning(f"⚠️ {consecutive_stops} последовательных стопов → экстренная адаптация")
-                    tg.send_message(f"⚠️ <b>Экстренная адаптация</b>\n{consecutive_stops} стопов подряд — корректирую параметры")
+                    tg.send_message(f"⚠️ <b>Экстренная адаптация</b>\\n{consecutive_stops} стопов подряд — корректирую параметры")
                 
                 result = adapter.adapt(daily_pnl, RSI_BUY_CURRENT, RSI_SELL_CURRENT)
                 block_new_trades   = result["block_new_trades"]
