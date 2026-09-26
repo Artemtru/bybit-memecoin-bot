@@ -1,0 +1,82 @@
+name: Update VPS Configuration
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_bots:
+        description: 'MAX_BOTS value'
+        required: true
+        default: '5'
+      qty_usdt:
+        description: 'QTY_USDT value (optional)'
+        required: false
+      scan_interval:
+        description: 'SCAN_INTERVAL_MIN value (optional)'
+        required: false
+      rsi_buy:
+        description: 'RSI_BUY value (optional)'
+        required: false
+      rsi_sell:
+        description: 'RSI_SELL value (optional)'
+        required: false
+
+jobs:
+  update-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update .env on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /root/bybit-memecoin-bot
+            
+            # Backup current .env
+            cp .env .env.backup_$(date +%Y%m%d_%H%M%S)
+            
+            # Update MAX_BOTS (always)
+            sed -i 's/^MAX_BOTS=.*/MAX_BOTS=${{ github.event.inputs.max_bots }}/' .env
+            echo "✅ MAX_BOTS updated to ${{ github.event.inputs.max_bots }}"
+            
+            # Update optional parameters if provided
+            if [ -n "${{ github.event.inputs.qty_usdt }}" ]; then
+              sed -i 's/^QTY_USDT=.*/QTY_USDT=${{ github.event.inputs.qty_usdt }}/' .env
+              echo "✅ QTY_USDT updated to ${{ github.event.inputs.qty_usdt }}"
+            fi
+            
+            if [ -n "${{ github.event.inputs.scan_interval }}" ]; then
+              sed -i 's/^SCAN_INTERVAL_MIN=.*/SCAN_INTERVAL_MIN=${{ github.event.inputs.scan_interval }}/' .env
+              echo "✅ SCAN_INTERVAL_MIN updated to ${{ github.event.inputs.scan_interval }}"
+            fi
+            
+            if [ -n "${{ github.event.inputs.rsi_buy }}" ]; then
+              sed -i 's/^RSI_BUY=.*/RSI_BUY=${{ github.event.inputs.rsi_buy }}/' .env
+              echo "✅ RSI_BUY updated to ${{ github.event.inputs.rsi_buy }}"
+            fi
+            
+            if [ -n "${{ github.event.inputs.rsi_sell }}" ]; then
+              sed -i 's/^RSI_SELL=.*/RSI_SELL=${{ github.event.inputs.rsi_sell }}/' .env
+              echo "✅ RSI_SELL updated to ${{ github.event.inputs.rsi_sell }}"
+            fi
+            
+            echo ""
+            echo "📝 Updated .env parameters:"
+            grep -E '^(MAX_BOTS|QTY_USDT|SCAN_INTERVAL_MIN|RSI_BUY|RSI_SELL)=' .env
+            
+      - name: Restart services
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "🔄 Restarting services..."
+            systemctl restart memecoin-bot telegram-bot
+            sleep 3
+            
+            echo ""
+            echo "✅ Services status:"
+            systemctl is-active memecoin-bot && echo "  memecoin-bot: active" || echo "  memecoin-bot: inactive"
+            systemctl is-active telegram-bot && echo "  telegram-bot: active" || echo "  telegram-bot: inactive"
