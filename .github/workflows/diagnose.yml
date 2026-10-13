@@ -5,7 +5,7 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Diagnose via SSH (no restart)
+      - name: Get crash traceback (no restart)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -13,26 +13,10 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /root/bybit-memecoin-bot
-            echo "=== systemctl status (full, no restart) ==="
-            systemctl status memecoin-bot --no-pager -l
-            echo "=== Tasks / restarts / uptime ==="
-            systemctl show memecoin-bot -p MainPID,ActiveState,SubState,NRestarts,ActiveEnterTimestamp
-            echo "=== Available log files ==="
-            ls -la logs/ 2>/dev/null | tail -20
-            echo "=== Latest manager log (any date) ==="
-            LATEST=$(ls -t logs/manager_*.log 2>/dev/null | head -1)
-            echo "File: $LATEST"
-            tail -80 "$LATEST" 2>/dev/null || echo "NO MANAGER LOG FOUND"
-            echo "=== trades.json tail ==="
-            tail -c 3000 logs/trades.json 2>/dev/null || echo "NO TRADES FILE"
-            echo "=== status.json (if present) ==="
-            cat logs/status.json 2>/dev/null || echo "NO STATUS FILE"
-            echo "=== Key .env params (no secrets) ==="
-            grep -E "^(MAX_BOTS|QTY_USDT|HERMES_ENABLED|SCAN_INTERVAL_MIN|RSI_BUY|RSI_SELL|LEVERAGE|DAILY_LOSS_LIMIT|MAX_CHANGE_PCT)=" .env
-            echo "=== Process list ==="
-            ps aux | grep -E "python.*manager|python.*telegram" | grep -v grep
-            echo "=== journalctl tail (last 80 lines, no restart) ==="
-            journalctl -u memecoin-bot --no-pager -n 80
-            echo "=== telegram-bot status ==="
-            systemctl status telegram-bot --no-pager -l | head -10
-            echo "=== DONE (read-only, nothing restarted) ==="
+            echo "=== Last 150 lines of service-error.log (the crash) ==="
+            tail -150 logs/service-error.log 2>/dev/null || echo "NO ERROR LOG"
+            echo "=== Current git commit on VPS ==="
+            git log --oneline -3
+            echo "=== git status ==="
+            git status
+            echo "=== DONE ==="
