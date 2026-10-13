@@ -5,7 +5,7 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Full status + today's activity (no restart)
+      - name: WIF close/open history today (no restart)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -13,23 +13,14 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /root/bybit-memecoin-bot
-            echo "=== systemctl status (no restart) ==="
-            systemctl status memecoin-bot --no-pager -l | head -10
-            echo "=== Restarts/uptime ==="
-            systemctl show memecoin-bot -p MainPID,ActiveState,SubState,NRestarts,ActiveEnterTimestamp
-            echo "=== status.json ==="
-            cat logs/status.json 2>/dev/null
-            echo ""
-            echo "=== trades.json full ==="
-            cat logs/trades.json 2>/dev/null
-            echo ""
-            echo "=== Today's manager log (all signal/trade lines) ==="
-            TODAY=$(date +%Y%m%d)
-            grep -E "Сигнал|Signal|Opening|Открыт|ОТКРЫТ|TP|SL|close_position|Closing|Закрыт" logs/manager_${TODAY}.log 2>/dev/null | tail -60 || echo "NO MATCHES OR NO LOG FOR TODAY"
-            echo "=== Today's log line count ==="
-            wc -l logs/manager_${TODAY}.log 2>/dev/null || echo "NO LOG FILE FOR TODAY"
-            echo "=== Last 50 lines of today's log (raw) ==="
-            tail -50 logs/manager_${TODAY}.log 2>/dev/null
-            echo "=== Key .env params ==="
-            grep -E "^(MAX_BOTS|QTY_USDT|HERMES_ENABLED|SCAN_INTERVAL_MIN|RSI_BUY|RSI_SELL|LEVERAGE|DAILY_LOSS_LIMIT|MAX_CHANGE_PCT|BB_PERIOD|BB_STD)=" .env
+            echo "=== WIFUSDT lines today (open/close) ==="
+            grep "WIFUSDT" logs/manager_$(date +%Y%m%d).log | grep -E "LONG|SHORT|Closed|✅|Opposite" 
+            echo "=== Closed/PnL lines today (any symbol) ==="
+            grep -E "Closed \||PnL:" logs/manager_$(date +%Y%m%d).log | grep -v "waiting\|PnL:\+0.0000" | tail -40
+            echo "=== record_trade / tracker errors ==="
+            grep -iE "tracker|record_trade" logs/manager_$(date +%Y%m%d).log | tail -20
+            echo "=== Any exceptions today ==="
+            grep -iE "error|exception|traceback" logs/manager_$(date +%Y%m%d).log | tail -30
+            echo "=== trades.json mtime ==="
+            stat -c '%y %n' logs/trades.json
             echo "=== DONE ==="

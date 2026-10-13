@@ -20,6 +20,7 @@ import math
 import time
 import threading
 import logging
+from decimal import Decimal
 from datetime import datetime
 from dotenv import load_dotenv
 from pybit.unified_trading import HTTP
@@ -246,7 +247,14 @@ def get_instrument_info(symbol):
 
 
 def round_price(price, tick_size):
-    prec = len(str(tick_size).rstrip("0").split(".")[-1]) if "." in str(tick_size) else 0
+    # FIX 2026-10-13: tick_size for low-price coins (SHIB, BONK, DOGE, PEPE, etc.)
+    # often arrives as scientific notation (e.g. 1e-05, 1e-06). str(1e-05) == '1e-05'
+    # has NO '.', so the old `"." in str(tick_size)` check fell through to prec=0,
+    # rounding every sub-$1 coin's price to a whole number (-> 0.0) and killing
+    # every TP/SL calc for that symbol ("Bad TP=0.0 SL=0.0 — skip"). Use Decimal to
+    # get an exact decimal exponent regardless of how Python's repr renders the float.
+    exponent = Decimal(str(tick_size)).normalize().as_tuple().exponent
+    prec = max(-exponent, 0) if isinstance(exponent, int) else 0
     return round(round(price / tick_size) * tick_size, prec)
 
 
@@ -254,7 +262,10 @@ def calc_qty(price, qty_usdt, qty_step, min_qty):
     raw     = qty_usdt / price
     stepped = math.floor(raw / qty_step) * qty_step
     result  = max(stepped, min_qty)
-    prec    = len(str(qty_step).rstrip("0").split(".")[-1]) if "." in str(qty_step) else 0
+    # Same scientific-notation fix as round_price() — qty_step can also arrive
+    # as e.g. 1e-06 for some pairs.
+    exponent = Decimal(str(qty_step)).normalize().as_tuple().exponent
+    prec = max(-exponent, 0) if isinstance(exponent, int) else 0
     return str(round(result, prec))
 
 
