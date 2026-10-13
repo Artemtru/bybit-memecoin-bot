@@ -31,6 +31,20 @@ jobs:
             systemctl restart memecoin-bot telegram-bot
             echo "✅ Status:"
             systemctl status memecoin-bot --no-pager -l | head -10
-            echo "📊 Recent activity:"
-            tail -5 /root/bybit-memecoin-bot/logs/manager_$(date +%Y%m%d).log 2>/dev/null || echo "No logs yet"
+            echo "🔧 Tasks/restarts:"
+            systemctl show memecoin-bot -p MainPID,ActiveState,SubState,NRestarts
+            echo "📊 Recent activity (today):"
+            tail -40 /root/bybit-memecoin-bot/logs/manager_$(date +%Y%m%d).log 2>/dev/null || echo "No logs yet"
+            echo "📊 Latest manager log (any date):"
+            LATEST=$(ls -t /root/bybit-memecoin-bot/logs/manager_*.log 2>/dev/null | head -1)
+            echo "File: $LATEST"
+            tail -40 "$LATEST" 2>/dev/null || echo "NO MANAGER LOG FOUND"
+            echo "💰 trades.json tail:"
+            tail -c 2000 /root/bybit-memecoin-bot/logs/trades.json 2>/dev/null || echo "NO TRADES FILE"
+            echo "⚙️  Key .env params:"
+            grep -E "^(MAX_BOTS|QTY_USDT|HERMES_ENABLED|SCAN_INTERVAL_MIN|RSI_BUY|RSI_SELL|LEVERAGE|DAILY_LOSS_LIMIT)=" /root/bybit-memecoin-bot/.env
+            echo "🐍 Process check:"
+            ps aux | grep -E "python.*manager|python.*telegram" | grep -v grep
+            echo "📰 journalctl tail:"
+            journalctl -u memecoin-bot --no-pager -n 60
             echo "🎉 Deploy complete!"
