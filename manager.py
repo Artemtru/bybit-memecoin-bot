@@ -530,6 +530,28 @@ def bot_thread(symbol: str, stop_event: threading.Event):
         log.error(f"[{symbol}] get_instrument_info failed: {e}")
         return
 
+    # FIX 2026-10-13: recover "we have an open position" memory after a manager
+    # restart. coin_data is purely in-memory — if the bot restarts (deploy,
+    # crash, systemd bounce) while a position is open on the exchange,
+    # open_price/open_side are lost. Without this, the reconciliation logic
+    # in the loop below (which needs open_price to detect server-side TP/SL
+    # fills) would never trigger for that position, and its eventual close
+    # would again be invisible to trades.json — same symptom as the original
+    # bug, just triggered by a restart instead of a sleep-through-fill.
+    existing_pos = get_position(symbol)
+    if existing_pos:
+        entry_px = float(existing_pos.get("avgPrice", 0) or 0)
+        coin_data.setdefault(symbol, {}).update({
+            "open_price": entry_px or None,
+            "open_side":  existing_pos.get("side"),
+            "open_mode":  "unknown",  # mode wasn't persisted across restart
+            "open_time":  time.time(),
+        })
+        log.info(
+            f"[{symbol}] 🔄 Recovered open position after restart: "
+            f"{existing_pos.get('side')} entry:{entry_px}"
+        )
+
     while not stop_event.is_set():
         try:
             closes, highs, lows, volumes = get_klines(symbol, INTERVAL)
