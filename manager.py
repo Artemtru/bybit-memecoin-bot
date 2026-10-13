@@ -104,6 +104,10 @@ block_new_trades:  bool = False
 adapter_counter:   int  = 0
 consecutive_stops: int  = 0
 STATUS_FILE = "logs/status.json"
+# FIX 2026-10-13: tracks the exchange updatedTime of the last closed-PnL row we
+# already recorded per symbol, so server-side TP/SL fills (reconciled via
+# get_last_closed_pnl) don't get logged twice across ticks/threads.
+last_recorded_close_ts: dict[str, int] = {}
 
 
 def reload_config():
@@ -283,6 +287,32 @@ def get_position(symbol):
         if float(p["size"]) > 0:
             return p
     return None
+
+
+def get_last_closed_pnl(symbol):
+    """
+    Fetch the most recent exchange-side closed PnL record for symbol.
+    Used to reconcile trades that were closed by Bybit itself (TP/SL hit
+    server-side while the bot was sleeping between ticks) — these never
+    go through our close_position() and were previously invisible to
+    trades.json / /weekly / /status.
+    """
+    try:
+        resp = session.get_closed_pnl(category="linear", symbol=symbol, limit=1)
+        rows = resp.get("result", {}).get("list", [])
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "side":        row.get("side"),            # side of the CLOSING order
+            "entry_price": float(row.get("avgEntryPrice", 0) or 0),
+            "exit_price":  float(row.get("avgExitPrice", 0) or 0),
+            "pnl":         float(row.get("closedPnl", 0) or 0),
+            "updated_time": int(row.get("updatedTime", 0) or 0),
+        }
+    except Exception as e:
+        log.warning(f"[{symbol}] get_last_closed_pnl error: {e}")
+        return None
 
 
 def cancel_orders(symbol):
@@ -490,7 +520,7 @@ def save_status():
 # ═══════════════════════════════════════════════════
 
 def bot_thread(symbol: str, stop_event: threading.Event):
-    global daily_pnl
+    global daily_pnl, consecutive_stops
     log.info(f"[{symbol}] ▶ started")
     set_leverage_safe(symbol)
     try:
@@ -511,6 +541,43 @@ def bot_thread(symbol: str, stop_event: threading.Event):
             pos_side = pos["side"] if pos else None
             pos_qty  = pos["size"] if pos else None  # FIX: None not "0"
             pnl      = float(pos["unrealisedPnl"]) if pos else 0.0
+
+            # FIX 2026-10-13: reconcile server-side TP/SL fills. If we believed
+            # a position was open (coin_data has open_price from open_position())
+            # but the exchange now reports no position, Bybit closed it itself
+            # (TP or SL triggered) while this thread was asleep between ticks.
+            # Without this, such trades were NEVER recorded — no trades.json
+            # entry, no /weekly data, no Telegram notification — even though
+            # real money moved on the exchange.
+            prev_open_price = coin_data.get(symbol, {}).get("open_price")
+            prev_open_side  = coin_data.get(symbol, {}).get("open_side")
+            if pos is None and prev_open_price is not None:
+                closed = get_last_closed_pnl(symbol)
+                if closed and closed["updated_time"] > last_recorded_close_ts.get(symbol, 0):
+                    last_recorded_close_ts[symbol] = closed["updated_time"]
+                    result_label = "TP" if closed["pnl"] > 0 else ("SL" if closed["pnl"] < 0 else "signal")
+                    log.info(
+                        f"[{symbol}] 🔁 Exchange closed position server-side "
+                        f"({result_label}) entry:{closed['entry_price']} "
+                        f"exit:{closed['exit_price']} PnL:{closed['pnl']:+.4f}"
+                    )
+                    tg.notify_position_closed(symbol, prev_open_side or closed["side"], closed["pnl"])
+                    tracker.record_trade(
+                        symbol=symbol, side=prev_open_side or closed["side"],
+                        result=result_label, pnl=closed["pnl"],
+                        entry_price=closed["entry_price"] or prev_open_price,
+                        exit_price=closed["exit_price"],
+                        mode=coin_data.get(symbol, {}).get("open_mode") or "unknown",
+                    )
+                    daily_pnl += closed["pnl"]
+                    consecutive_stops = consecutive_stops + 1 if closed["pnl"] < 0 else 0
+                elif closed is None:
+                    log.warning(f"[{symbol}] Position vanished but no closed-PnL record found — exchange API lag?")
+                # Either way, clear the "we have an open position" memory so we
+                # don't keep re-checking / re-notifying on every tick.
+                coin_data.setdefault(symbol, {}).update({
+                    "open_price": None, "open_side": None, "open_mode": None,
+                })
 
             log.info(
                 f"[{symbol}] {price:.6f} RSI:{rsi} ATR%:{atr_pct} "
