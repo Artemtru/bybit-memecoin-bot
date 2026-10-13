@@ -479,6 +479,7 @@ def save_status():
 # ═══════════════════════════════════════════════════
 
 def bot_thread(symbol: str, stop_event: threading.Event):
+    global daily_pnl
     log.info(f"[{symbol}] ▶ started")
     set_leverage_safe(symbol)
     try:
@@ -526,7 +527,6 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                 signal, _, _ = signal_sideways(closes, highs, lows, price, rsi, volumes)
                 if signal and pos_side and pos_side != signal:
                     if pnl > 0:
-                        global daily_pnl
                         daily_pnl += pnl
                         close_position(symbol, pos_side, pos_qty, pnl)
                         time.sleep(1); pos_side, pos_qty = None, None
