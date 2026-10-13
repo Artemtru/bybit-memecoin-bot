@@ -5,7 +5,7 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Get crash traceback (no restart)
+      - name: Check status (no restart)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -13,10 +13,14 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /root/bybit-memecoin-bot
-            echo "=== Last 150 lines of service-error.log (the crash) ==="
-            tail -150 logs/service-error.log 2>/dev/null || echo "NO ERROR LOG"
-            echo "=== Current git commit on VPS ==="
-            git log --oneline -3
-            echo "=== git status ==="
-            git status
+            echo "=== systemctl status (no restart) ==="
+            systemctl status memecoin-bot --no-pager -l
+            echo "=== Restarts/uptime ==="
+            systemctl show memecoin-bot -p MainPID,ActiveState,SubState,NRestarts,ActiveEnterTimestamp
+            echo "=== Latest manager log tail ==="
+            LATEST=$(ls -t logs/manager_*.log 2>/dev/null | head -1)
+            echo "File: $LATEST"
+            tail -40 "$LATEST" 2>/dev/null || echo "NO LOG"
+            echo "=== Last 30 lines of service-error.log ==="
+            tail -30 logs/service-error.log 2>/dev/null
             echo "=== DONE ==="
