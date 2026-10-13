@@ -5,7 +5,7 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: WIF close/open history today (no restart)
+      - name: Verify fix deployed cleanly (no restart)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -13,14 +13,16 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /root/bybit-memecoin-bot
-            echo "=== WIFUSDT lines today (open/close) ==="
-            grep "WIFUSDT" logs/manager_$(date +%Y%m%d).log | grep -E "LONG|SHORT|Closed|✅|Opposite" 
-            echo "=== Closed/PnL lines today (any symbol) ==="
-            grep -E "Closed \||PnL:" logs/manager_$(date +%Y%m%d).log | grep -v "waiting\|PnL:\+0.0000" | tail -40
-            echo "=== record_trade / tracker errors ==="
-            grep -iE "tracker|record_trade" logs/manager_$(date +%Y%m%d).log | tail -20
-            echo "=== Any exceptions today ==="
-            grep -iE "error|exception|traceback" logs/manager_$(date +%Y%m%d).log | tail -30
-            echo "=== trades.json mtime ==="
-            stat -c '%y %n' logs/trades.json
+            echo "=== systemctl status ==="
+            systemctl status memecoin-bot --no-pager -l | head -10
+            echo "=== Restarts/uptime ==="
+            systemctl show memecoin-bot -p MainPID,ActiveState,SubState,NRestarts,ActiveEnterTimestamp
+            echo "=== git HEAD on VPS ==="
+            git log --oneline -3
+            echo "=== Last 40 lines of today's log ==="
+            tail -40 logs/manager_$(date +%Y%m%d).log 2>/dev/null
+            echo "=== Any errors/exceptions in last 100 lines ==="
+            tail -100 logs/manager_$(date +%Y%m%d).log 2>/dev/null | grep -iE "error|exception|traceback" || echo "none"
+            echo "=== Last 30 lines of service-error.log ==="
+            tail -30 logs/service-error.log 2>/dev/null
             echo "=== DONE ==="
