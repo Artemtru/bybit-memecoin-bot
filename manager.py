@@ -706,6 +706,7 @@ def print_status():
 
 def main():
     global block_new_trades, adapter_counter, consecutive_stops
+    global RSI_BUY_CURRENT, RSI_SELL_CURRENT
 
     log.info("=" * 54)
     log.info(f"  🚀 MANAGER v3 | Hermes:{'ON' if HERMES_ENABLED else 'OFF'}")
