@@ -5,7 +5,7 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Verify fix deployed cleanly (no restart)
+      - name: Check current error state (no restart)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -14,15 +14,15 @@ jobs:
           script: |
             cd /root/bybit-memecoin-bot
             echo "=== systemctl status ==="
-            systemctl status memecoin-bot --no-pager -l | head -10
+            systemctl status memecoin-bot --no-pager -l | head -15
             echo "=== Restarts/uptime ==="
             systemctl show memecoin-bot -p MainPID,ActiveState,SubState,NRestarts,ActiveEnterTimestamp
             echo "=== git HEAD on VPS ==="
             git log --oneline -3
-            echo "=== Last 40 lines of today's log ==="
-            tail -40 logs/manager_$(date +%Y%m%d).log 2>/dev/null
-            echo "=== Any errors/exceptions in last 100 lines ==="
-            tail -100 logs/manager_$(date +%Y%m%d).log 2>/dev/null | grep -iE "error|exception|traceback" || echo "none"
-            echo "=== Last 30 lines of service-error.log ==="
-            tail -30 logs/service-error.log 2>/dev/null
+            echo "=== Last 100 lines of today's log ==="
+            tail -100 logs/manager_$(date +%Y%m%d).log 2>/dev/null
+            echo "=== Errors/exceptions/tracebacks today ==="
+            grep -iE "error|exception|traceback" logs/manager_$(date +%Y%m%d).log 2>/dev/null | tail -40
+            echo "=== Last 50 lines of service-error.log ==="
+            tail -50 logs/service-error.log 2>/dev/null
             echo "=== DONE ==="
