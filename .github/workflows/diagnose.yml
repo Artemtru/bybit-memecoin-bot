@@ -5,7 +5,7 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - name: Today's PnL and trade history (no restart)
+      - name: Check restart count and circuit breaker activity (no restart)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -13,26 +13,16 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /root/bybit-memecoin-bot
-            echo "=== systemctl status ==="
-            systemctl status memecoin-bot --no-pager -l | head -10
-            echo "=== Restarts/uptime ==="
-            systemctl show memecoin-bot -p MainPID,ActiveState,SubState,NRestarts,ActiveEnterTimestamp
-            echo "=== status.json (current state) ==="
-            cat logs/status.json 2>/dev/null
-            echo ""
-            echo "=== trades.json FULL ==="
-            cat logs/trades.json 2>/dev/null
-            echo ""
-            echo "=== Today's closed/TP/SL/PnL lines ==="
-            grep -E "Closed \||🔁 Exchange closed|PnL:[-+]" logs/manager_$(date +%Y%m%d).log 2>/dev/null | grep -v "PnL:+0.0000"
-            echo "=== Today's open position lines ==="
-            grep -E "LONG|SHORT" logs/manager_$(date +%Y%m%d).log 2>/dev/null | grep -E "Limit IOC|✅"
-            echo "=== Today's Bad TP/SL skips count ==="
-            grep -c "Bad TP" logs/manager_$(date +%Y%m%d).log 2>/dev/null || echo "0"
-            echo "=== Daily loss limit hits today ==="
-            grep -i "daily loss limit\|лимит потерь" logs/manager_$(date +%Y%m%d).log 2>/dev/null
-            echo "=== Key .env params ==="
-            grep -E "^(MAX_BOTS|QTY_USDT|SCAN_INTERVAL_MIN|RSI_BUY|RSI_SELL|LEVERAGE|DAILY_LOSS_LIMIT|BB_PERIOD|BB_STD|ATR_TP_MULT|ATR_SL_MULT)=" .env
-            echo "=== Consecutive stops / adapter activity today ==="
-            grep -iE "consecutive|emergency adapt|адаптирован|Серия стопов" logs/manager_$(date +%Y%m%d).log 2>/dev/null | tail -20
+            echo "=== How many times manager started today (restart count) ==="
+            grep -c "MANAGER v3" logs/manager_$(date +%Y%m%d).log 2>/dev/null
+            echo "=== Timestamps of each manager start today ==="
+            grep "MANAGER v3" logs/manager_$(date +%Y%m%d).log 2>/dev/null
+            echo "=== Full .env (no secrets) ==="
+            grep -vE "KEY|SECRET|TOKEN" .env
+            echo "=== Scanner filters ==="
+            grep -E "MEME_KEYWORDS|min_volume|max_change|MAX_CHANGE" scanner.py | head -20
+            echo "=== ADX / volume confirmation present in manager.py? ==="
+            grep -niE "adx|volume_ok|vol_ok" manager.py
+            echo "=== journalctl restart events today ==="
+            journalctl -u memecoin-bot --since today --no-pager | grep -iE "Scheduled restart|Started memecoin|Main process exited" | tail -40
             echo "=== DONE ==="
