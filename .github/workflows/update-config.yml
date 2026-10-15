@@ -1,0 +1,118 @@
+name: Update VPS Configuration
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_bots:
+        description: 'MAX_BOTS value'
+        required: true
+        default: '5'
+      qty_usdt:
+        description: 'QTY_USDT value (optional)'
+        required: false
+      scan_interval:
+        description: 'SCAN_INTERVAL_MIN value (optional)'
+        required: false
+      rsi_buy:
+        description: 'RSI_BUY value (optional)'
+        required: false
+      rsi_sell:
+        description: 'RSI_SELL value (optional)'
+        required: false
+      daily_loss_limit:
+        description: 'DAILY_LOSS_LIMIT value (optional, e.g. -2)'
+        required: false
+      stop_cooldown_min:
+        description: 'STOP_COOLDOWN_MIN value (optional, e.g. 20)'
+        required: false
+      adx_trend_threshold:
+        description: 'ADX_TREND_THRESHOLD value (optional, e.g. 25)'
+        required: false
+
+jobs:
+  update-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update .env on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /root/bybit-memecoin-bot
+            
+            # Backup current .env
+            cp .env .env.backup_$(date +%Y%m%d_%H%M%S)
+            
+            # Update MAX_BOTS (always)
+            sed -i 's/^MAX_BOTS=.*/MAX_BOTS=${{ github.event.inputs.max_bots }}/' .env
+            echo "✅ MAX_BOTS updated to ${{ github.event.inputs.max_bots }}"
+            
+            # Update optional parameters if provided
+            if [ -n "${{ github.event.inputs.qty_usdt }}" ]; then
+              sed -i 's/^QTY_USDT=.*/QTY_USDT=${{ github.event.inputs.qty_usdt }}/' .env
+              echo "✅ QTY_USDT updated to ${{ github.event.inputs.qty_usdt }}"
+            fi
+            
+            if [ -n "${{ github.event.inputs.scan_interval }}" ]; then
+              sed -i 's/^SCAN_INTERVAL_MIN=.*/SCAN_INTERVAL_MIN=${{ github.event.inputs.scan_interval }}/' .env
+              echo "✅ SCAN_INTERVAL_MIN updated to ${{ github.event.inputs.scan_interval }}"
+            fi
+            
+            if [ -n "${{ github.event.inputs.rsi_buy }}" ]; then
+              sed -i 's/^RSI_BUY=.*/RSI_BUY=${{ github.event.inputs.rsi_buy }}/' .env
+              echo "✅ RSI_BUY updated to ${{ github.event.inputs.rsi_buy }}"
+            fi
+            
+            if [ -n "${{ github.event.inputs.rsi_sell }}" ]; then
+              sed -i 's/^RSI_SELL=.*/RSI_SELL=${{ github.event.inputs.rsi_sell }}/' .env
+              echo "✅ RSI_SELL updated to ${{ github.event.inputs.rsi_sell }}"
+            fi
+
+            if [ -n "${{ github.event.inputs.daily_loss_limit }}" ]; then
+              if grep -q '^DAILY_LOSS_LIMIT=' .env; then
+                sed -i 's/^DAILY_LOSS_LIMIT=.*/DAILY_LOSS_LIMIT=${{ github.event.inputs.daily_loss_limit }}/' .env
+              else
+                echo "DAILY_LOSS_LIMIT=${{ github.event.inputs.daily_loss_limit }}" >> .env
+              fi
+              echo "✅ DAILY_LOSS_LIMIT updated to ${{ github.event.inputs.daily_loss_limit }}"
+            fi
+
+            if [ -n "${{ github.event.inputs.stop_cooldown_min }}" ]; then
+              if grep -q '^STOP_COOLDOWN_MIN=' .env; then
+                sed -i 's/^STOP_COOLDOWN_MIN=.*/STOP_COOLDOWN_MIN=${{ github.event.inputs.stop_cooldown_min }}/' .env
+              else
+                echo "STOP_COOLDOWN_MIN=${{ github.event.inputs.stop_cooldown_min }}" >> .env
+              fi
+              echo "✅ STOP_COOLDOWN_MIN updated to ${{ github.event.inputs.stop_cooldown_min }}"
+            fi
+
+            if [ -n "${{ github.event.inputs.adx_trend_threshold }}" ]; then
+              if grep -q '^ADX_TREND_THRESHOLD=' .env; then
+                sed -i 's/^ADX_TREND_THRESHOLD=.*/ADX_TREND_THRESHOLD=${{ github.event.inputs.adx_trend_threshold }}/' .env
+              else
+                echo "ADX_TREND_THRESHOLD=${{ github.event.inputs.adx_trend_threshold }}" >> .env
+              fi
+              echo "✅ ADX_TREND_THRESHOLD updated to ${{ github.event.inputs.adx_trend_threshold }}"
+            fi
+
+            echo ""
+            echo "📝 Updated .env parameters:"
+            grep -E '^(MAX_BOTS|QTY_USDT|SCAN_INTERVAL_MIN|RSI_BUY|RSI_SELL|DAILY_LOSS_LIMIT|STOP_COOLDOWN_MIN|ADX_TREND_THRESHOLD)=' .env
+            
+      - name: Restart services
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "🔄 Restarting services..."
+            systemctl restart memecoin-bot telegram-bot
+            sleep 3
+            
+            echo ""
+            echo "✅ Services status:"
+            systemctl is-active memecoin-bot && echo "  memecoin-bot: active" || echo "  memecoin-bot: inactive"
+            systemctl is-active telegram-bot && echo "  telegram-bot: active" || echo "  telegram-bot: inactive"

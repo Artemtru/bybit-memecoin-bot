@@ -53,7 +53,6 @@ if HERMES_ENABLED:
 # ── Настройки ────────────────────────────────────────
 SCAN_INTERVAL_MIN = int(float(os.getenv("SCAN_INTERVAL_MIN", "120")))
 MAX_BOTS          = int(float(os.getenv("MAX_BOTS",           "3")))
-DAILY_LOSS_LIMIT  = float(os.getenv("DAILY_LOSS_LIMIT",      "-50"))
 LEVERAGE          = int(float(os.getenv("LEVERAGE",           "2")))
 QTY_USDT_BASE     = float(os.getenv("QTY_USDT",              "20"))
 INTERVAL          = os.getenv("INTERVAL", "5")
@@ -76,6 +75,24 @@ SIDEWAYS_ATR_THRESHOLD = float(os.getenv("SIDEWAYS_ATR_THRESHOLD", "0.015"))
 
 RSI_BUY_CURRENT  = float(os.getenv("RSI_BUY",  "42"))
 RSI_SELL_CURRENT = float(os.getenv("RSI_SELL", "58"))
+
+# FIX 2026-10-15: strategy-risk hardening after a 0/15 winrate night.
+# 1) DAILY_LOSS_LIMIT default dropped from -50 to -2 — at QTY~20-30$ and
+#    leverage 2x, a single SL is ~$0.07-0.09, so -50 could never realistically
+#    trigger (would need ~600 losing trades/day). -2 stops the bleeding after
+#    roughly 20-25 consecutive stops instead of letting it run all day.
+# 2) STOP_COOLDOWN_MIN — after a symbol stops out, don't re-enter it for N
+#    minutes. Without this the bot was re-opening the same symbol into the
+#    same adverse move within one SLEEP_SEC tick (e.g. WIFUSDT stopped 3x in
+#    ~70 minutes).
+# 3) ADX_TREND_THRESHOLD — real ADX is now computed (see calc_adx) and used
+#    to veto sideways/mean-reversion entries when the market is actually
+#    trending (ADX above threshold). Previously ADX was hardcoded to 25.0
+#    and only fed to the (disabled) AI module — never used to gate trades.
+DAILY_LOSS_LIMIT    = float(os.getenv("DAILY_LOSS_LIMIT",    "-2"))
+STOP_COOLDOWN_MIN    = float(os.getenv("STOP_COOLDOWN_MIN",   "20"))
+ADX_PERIOD           = int(float(os.getenv("ADX_PERIOD",      "14")))
+ADX_TREND_THRESHOLD  = float(os.getenv("ADX_TREND_THRESHOLD", "25"))
 
 API_KEY    = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -108,6 +125,9 @@ STATUS_FILE = "logs/status.json"
 # already recorded per symbol, so server-side TP/SL fills (reconciled via
 # get_last_closed_pnl) don't get logged twice across ticks/threads.
 last_recorded_close_ts: dict[str, int] = {}
+# FIX 2026-10-15: per-symbol cooldown after a stop-loss, to stop the bot from
+# re-entering the same adverse move within minutes of getting stopped out.
+last_stop_time: dict[str, float] = {}
 
 
 def reload_config():
@@ -196,19 +216,79 @@ def calc_ema(closes, period):
     return round(ema, 8)
 
 
+def calc_adx(closes, highs, lows, period=14):
+    """Wilder's ADX — real trend-strength indicator.
+    FIX 2026-10-15: previously ADX was hardcoded to 25.0 everywhere and never
+    actually computed, so the bot had no way to distinguish a trending market
+    from a ranging one. This feeds detect_market_mode() to veto mean-reversion
+    (sideways) entries when the market is genuinely trending — the "catching
+    a falling knife" failure mode behind the 0/15 winrate night.
+    """
+    n = len(closes)
+    if n < period * 2 + 1:
+        return None
+    plus_dm, minus_dm, trs = [], [], []
+    for i in range(1, n):
+        up_move   = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
+        minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
+        trs.append(max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        ))
+
+    def _wilder_smooth(vals, period):
+        smoothed = [sum(vals[:period])]
+        for v in vals[period:]:
+            smoothed.append(smoothed[-1] - (smoothed[-1] / period) + v)
+        return smoothed
+
+    atr_s    = _wilder_smooth(trs, period)
+    plus_s   = _wilder_smooth(plus_dm, period)
+    minus_s  = _wilder_smooth(minus_dm, period)
+
+    dxs = []
+    for atr_v, p_v, m_v in zip(atr_s, plus_s, minus_s):
+        if atr_v == 0:
+            continue
+        plus_di  = 100 * (p_v / atr_v)
+        minus_di = 100 * (m_v / atr_v)
+        denom = plus_di + minus_di
+        if denom == 0:
+            continue
+        dxs.append(100 * abs(plus_di - minus_di) / denom)
+
+    if len(dxs) < period:
+        return None
+    adx = sum(dxs[:period]) / period
+    for dx in dxs[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return round(adx, 2)
+
+
 def detect_market_mode(closes, highs, lows, price):
     atr = calc_atr(closes, highs, lows, ATR_PERIOD)
     if atr is None:
-        return "trend", None, None
+        return "trend", None, None, None
     atr_pct = atr / price
     ema20   = calc_ema(closes, 20)
     ema50   = calc_ema(closes, 50)
+    adx     = calc_adx(closes, highs, lows, ADX_PERIOD)
     if ema20 and ema50:
         ema_diff = abs(ema20 - ema50) / price
         mode = "sideways" if (atr_pct < SIDEWAYS_ATR_THRESHOLD and ema_diff < 0.02) else "trend"
     else:
         mode = "sideways" if atr_pct < SIDEWAYS_ATR_THRESHOLD else "trend"
-    return mode, atr, round(atr_pct * 100, 2)
+    # FIX 2026-10-15: ADX veto — if the real ADX shows a strong trend
+    # (>= ADX_TREND_THRESHOLD), don't trust the sideways/mean-reversion
+    # classification even if ATR/EMA looked calm; force "trend" mode so
+    # signal_sideways() (which fades moves — the opposite of what you want
+    # in a real trend) doesn't get used.
+    if adx is not None and adx >= ADX_TREND_THRESHOLD:
+        mode = "trend"
+    return mode, atr, round(atr_pct * 100, 2), adx
 
 
 # ═══════════════════════════════════════════════════
@@ -347,7 +427,7 @@ def check_funding_rate(symbol) -> bool:
     return True
 
 
-def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode, atr_pct=None):
+def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode, atr_pct=None, adx=None):
     # 1. AI veto
     if HERMES_ENABLED and brain:
         try:
@@ -357,7 +437,10 @@ def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode, 
                 signal="BUY" if side == "Buy" else "SELL",
                 price=price,
                 rsi=coin_data.get(symbol, {}).get("rsi", 50),
-                adx=25.0,
+                # FIX 2026-10-15: was hardcoded 25.0 — now the real computed ADX
+                # (falls back to the trend threshold if ADX couldn't be computed
+                # yet, e.g. not enough candle history).
+                adx=adx if adx is not None else ADX_TREND_THRESHOLD,
                 atr_pct=atr_pct or 0.02,
                 mode=mode,
                 vol_ratio=1.0,
@@ -430,7 +513,7 @@ def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode, 
 
 
 def close_position(symbol, side, qty, pnl=0.0, result="signal", exit_price=None):
-    global consecutive_stops
+    global consecutive_stops, block_new_trades
     # FIX: guard against qty=None (when position wasn't open)
     if not qty:
         log.warning(f"[{symbol}] close_position called with qty=None — skip")
@@ -445,6 +528,18 @@ def close_position(symbol, side, qty, pnl=0.0, result="signal", exit_price=None)
     log.info(f"[{symbol}] Closed | PnL:{pnl:+.4f}")
     tg.notify_position_closed(symbol, side, pnl)
     consecutive_stops = consecutive_stops + 1 if pnl < 0 else 0
+    # FIX 2026-10-15: start a cooldown on this symbol after any losing close,
+    # so bot_thread() won't immediately re-enter the same adverse move.
+    if pnl < 0:
+        last_stop_time[symbol] = time.time()
+    # FIX 2026-10-15: circuit breaker used to only react once every
+    # SCAN_INTERVAL_MIN (up to 30min of extra damage). Now block_new_trades
+    # flips immediately, right here, the moment the 3rd consecutive stop
+    # closes — main()'s periodic adapt() loop still resets it afterwards.
+    if consecutive_stops >= 3 and not block_new_trades:
+        block_new_trades = True
+        log.warning(f"[{symbol}] ⚠️ {consecutive_stops} consecutive stops → blocking new entries NOW")
+        tg.send_message(f"⚠️ <b>Серия стопов ({consecutive_stops})</b>\nНовые входы заблокированы немедленно.")
     tracker.record_trade(
         symbol=symbol, side=side, result=result, pnl=pnl,
         entry_price=coin_data.get(symbol, {}).get("open_price"),
@@ -520,7 +615,7 @@ def save_status():
 # ═══════════════════════════════════════════════════
 
 def bot_thread(symbol: str, stop_event: threading.Event):
-    global daily_pnl, consecutive_stops
+    global daily_pnl, consecutive_stops, block_new_trades
     log.info(f"[{symbol}] ▶ started")
     set_leverage_safe(symbol)
     try:
@@ -558,7 +653,7 @@ def bot_thread(symbol: str, stop_event: threading.Event):
             price   = closes[-1]
             rsi     = calc_rsi(closes, RSI_PERIOD)
             atr     = calc_atr(closes, highs, lows, ATR_PERIOD)
-            mode, _, atr_pct = detect_market_mode(closes, highs, lows, price)
+            mode, _, atr_pct, adx = detect_market_mode(closes, highs, lows, price)
             pos      = get_position(symbol)
             pos_side = pos["side"] if pos else None
             pos_qty  = pos["size"] if pos else None  # FIX: None not "0"
@@ -593,6 +688,14 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                     )
                     daily_pnl += closed["pnl"]
                     consecutive_stops = consecutive_stops + 1 if closed["pnl"] < 0 else 0
+                    # FIX 2026-10-15: server-side TP/SL fills need the same
+                    # cooldown bookkeeping as bot-initiated close_position().
+                    if closed["pnl"] < 0:
+                        last_stop_time[symbol] = time.time()
+                    if consecutive_stops >= 3 and not block_new_trades:
+                        block_new_trades = True
+                        log.warning(f"[{symbol}] ⚠️ {consecutive_stops} consecutive stops (server-side) → blocking new entries NOW")
+                        tg.send_message(f"⚠️ <b>Серия стопов ({consecutive_stops})</b>\nНовые входы заблокированы немедленно.")
                 elif closed is None:
                     log.warning(f"[{symbol}] Position vanished but no closed-PnL record found — exchange API lag?")
                 # Either way, clear the "we have an open position" memory so we
@@ -621,8 +724,17 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                 break
 
             signal = None
+            # FIX 2026-10-15: cooldown gate — after a stop-loss on this symbol,
+            # don't open a new position here for STOP_COOLDOWN_MIN minutes.
+            cooldown_left = 0.0
+            last_stop = last_stop_time.get(symbol)
+            if last_stop is not None:
+                cooldown_left = STOP_COOLDOWN_MIN * 60 - (time.time() - last_stop)
+            in_cooldown = cooldown_left > 0
             if block_new_trades and not pos_side:
                 log.info(f"[{symbol}] New entries blocked")
+            elif in_cooldown and not pos_side:
+                log.info(f"[{symbol}] Cooldown after stop — {cooldown_left/60:.1f}min left, skip new entries")
             elif mode == "sideways":
                 signal, _, _ = signal_sideways(closes, highs, lows, price, rsi, volumes)
                 if signal and pos_side and pos_side != signal:
@@ -633,7 +745,7 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                     else:
                         log.info(f"[{symbol}] Opposite signal but PnL{pnl:+.4f} — hold for TP/SL")
                 if signal and pos_side is None:
-                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct)
+                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct, adx)
             else:
                 signal = signal_trend(rsi)
                 if signal and pos_side and pos_side != signal:
@@ -644,7 +756,7 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                     else:
                         log.info(f"[{symbol}] Opposite signal but PnL{pnl:+.4f} — hold for TP/SL")
                 if signal and pos_side is None:
-                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct)
+                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct, adx)
 
             if not signal:
                 log.info(f"[{symbol}] No signal, waiting...")
