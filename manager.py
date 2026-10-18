@@ -1,16 +1,16 @@
 """
 ╔══════════════════════════════════════════════════════╗
-║           MANAGER.PY — Адаптивный менеджер v3        ║
+║           MANAGER.PY — Адаптивный менеджер v3.2      ║
 ║                                                      ║
-║  Fixes v3:                                           ║
-║  • load_dotenv() BEFORE imports (HERMES_ENABLED fix) ║
-║  • reload_config() — hot reload without restart     ║
-║  • pos_qty None guard in close_position             ║
-║  • funding rate key fix (fundingRate/lastFundingRate)║
-║  • IOC order fill check with Market fallback        ║
-║  • open_position signal="BUY"/"SELL" (not side)    ║
-║  • coin_data.setdefault() prevents KeyError         ║
-║  • scan() passes shared session                     ║
+║  v3.2 (2026-10-18):                                  ║
+║  • calc_adaptive_qty: исправлены единицы ATR (%)     ║
+║    — QTY_USDT снова реально задаёт размер позиции    ║
+║  • MIN_SL_PCT, SIDEWAYS_RSI_LONG_MAX/SHORT_MIN       ║
+║    вынесены в .env (дефолты = прежнее поведение)     ║
+║  • в лог входа добавлен фактический R:R              ║
+║  • adapt_rsi_thresholds выключен по умолчанию        ║
+║    (ADAPT_RSI=1 чтобы включить)                      ║
+║  • global-объявления подняты в начало функций        ║
 ╚══════════════════════════════════════════════════════╝
 """
 
@@ -72,6 +72,18 @@ ATR_TP_MULT = float(os.getenv("ATR_TP_MULT",      "2.5"))
 ATR_SL_MULT = float(os.getenv("ATR_SL_MULT",      "1.2"))
 
 SIDEWAYS_ATR_THRESHOLD = float(os.getenv("SIDEWAYS_ATR_THRESHOLD", "0.015"))
+
+# v3.2: раньше зашито в коде. Дефолты = прежнее поведение (ничего не меняется,
+# пока значения не заданы в .env).
+# Минимальная дистанция SL в долях цены (0.005 = 0.5%). На тихих монетах
+# (ATR% < ~0.4) именно она определяет SL и TP, а не ATR-множители.
+MIN_SL_PCT             = float(os.getenv("MIN_SL_PCT",             "0.005"))
+# RSI-фильтр входа в боковике: LONG только при RSI < LONG_MAX, SHORT при RSI > SHORT_MIN
+SIDEWAYS_RSI_LONG_MAX  = float(os.getenv("SIDEWAYS_RSI_LONG_MAX",  "55"))
+SIDEWAYS_RSI_SHORT_MIN = float(os.getenv("SIDEWAYS_RSI_SHORT_MIN", "45"))
+# Автоподстройка RSI_BUY/RSI_SELL по рынку. Эти пороги используются только
+# трендовой логикой, которая отключена, поэтому по умолчанию выключено.
+ADAPT_RSI              = os.getenv("ADAPT_RSI", "0") == "1"
 
 RSI_BUY_CURRENT  = float(os.getenv("RSI_BUY",  "42"))
 RSI_SELL_CURRENT = float(os.getenv("RSI_SELL", "58"))
@@ -269,6 +281,7 @@ def calc_adx(closes, highs, lows, period=14):
 
 
 def detect_market_mode(closes, highs, lows, price):
+    """Возвращает (mode, atr, atr_pct, adx). ВАЖНО: atr_pct — в ПРОЦЕНТАХ (0.27 == 0.27%)."""
     atr = calc_atr(closes, highs, lows, ATR_PERIOD)
     if atr is None:
         return "trend", None, None, None
@@ -304,14 +317,16 @@ def signal_sideways(closes, highs, lows, price, rsi, volumes=None):
     if volumes and len(volumes) >= 20:
         avg_vol = sum(volumes[-20:-1]) / 19
         vol_ok  = volumes[-1] > avg_vol * 1.3
-    if prev <= lower and price > lower and rsi < 55 and vol_ok:
+    # v3.2: пороги RSI берутся из .env (дефолт 55/45 = прежнее поведение)
+    if prev <= lower and price > lower and rsi < SIDEWAYS_RSI_LONG_MAX and vol_ok:
         return "Buy",  mid, lower
-    if prev >= upper and price < upper and rsi > 45 and vol_ok:
+    if prev >= upper and price < upper and rsi > SIDEWAYS_RSI_SHORT_MIN and vol_ok:
         return "Sell", mid, upper
     return None, None, None
 
 
 def signal_trend(rsi):
+    # Не используется с 2026-10-18 (торговля в тренде отключена); оставлено для истории.
     if rsi < RSI_BUY_CURRENT:  return "Buy"
     if rsi > RSI_SELL_CURRENT: return "Sell"
     return None
@@ -354,9 +369,17 @@ def calc_qty(price, qty_usdt, qty_step, min_qty):
 
 
 def calc_adaptive_qty(price, atr_pct, qty_step, min_qty):
+    """Размер позиции в монетах. atr_pct — ATR в ПРОЦЕНТАХ от цены (0.27 == 0.27%),
+    ровно как возвращает detect_market_mode().
+
+    FIX 2026-10-18: раньше atr_pct (в %) подставлялся в формулу как доля, из-за чего
+    vol_mult был ~0.27 вместо ~0.97 и размер ВСЕГДА упирался в MIN_POSITION_USDT
+    (QTY_USDT фактически игнорировался).
+    """
     if not atr_pct or atr_pct <= 0:
-        atr_pct = 0.02
-    vol_mult = 1 / (1 + atr_pct * 10)
+        atr_pct = 2.0
+    atr_frac = atr_pct / 100.0
+    vol_mult = 1 / (1 + atr_frac * 10)
     qty_usdt = max(min(QTY_USDT_BASE * vol_mult, MAX_POSITION_USDT), MIN_POSITION_USDT)
     return calc_qty(price, qty_usdt, qty_step, min_qty)
 
@@ -441,7 +464,7 @@ def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode, 
                 # (falls back to the trend threshold if ADX couldn't be computed
                 # yet, e.g. not enough candle history).
                 adx=adx if adx is not None else ADX_TREND_THRESHOLD,
-                atr_pct=atr_pct or 0.02,
+                atr_pct=atr_pct if atr_pct else 2.0,
                 mode=mode,
                 vol_ratio=1.0,
                 include_news=False,  # FIX: Hermes has no internet access via OpenRouter
@@ -458,10 +481,10 @@ def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode, 
         return
 
     # 3. Adaptive qty
-    qty = calc_adaptive_qty(price, atr_pct or 0.02, qty_step, min_qty)
+    qty = calc_adaptive_qty(price, atr_pct, qty_step, min_qty)
 
     # 4. TP/SL with zero-protection
-    min_move = max(price * 0.005, tick_size * 10)
+    min_move = max(price * MIN_SL_PCT, tick_size * 10)
     tp_move  = max(atr * ATR_TP_MULT, min_move * 2) if atr and atr > 0 else price * 0.03
     sl_move  = max(atr * ATR_SL_MULT, min_move)     if atr and atr > 0 else price * 0.015
 
@@ -478,8 +501,10 @@ def open_position(symbol, side, price, atr, tick_size, qty_step, min_qty, mode, 
 
     # 5. Limit IOC with Market fallback
     limit_px = round_price(price * (1.003 if side == "Buy" else 0.997), tick_size)
+    rr = tp_move / sl_move if sl_move else 0.0
     log.info(f"[{symbol}] {'LONG' if side=='Buy' else 'SHORT'} Limit IOC "
-             f"qty:{qty}(~{float(qty)*price:.1f}$) entry:{limit_px} TP:{tp} SL:{sl} {mode}")
+             f"qty:{qty}(~{float(qty)*price:.1f}$) entry:{limit_px} TP:{tp} SL:{sl} "
+             f"R:R={rr:.2f} {mode}")
 
     session.place_order(
         category="linear", symbol=symbol,
@@ -571,6 +596,10 @@ def update_env_rsi(new_buy, new_sell):
 
 def adapt_rsi_thresholds(coins):
     global RSI_BUY_CURRENT, RSI_SELL_CURRENT
+    # v3.2: RSI_BUY/RSI_SELL читает только трендовая логика (отключена), а эта
+    # функция при каждом скане переписывала .env и затирала ручные значения.
+    if not ADAPT_RSI:
+        return
     rsi_vals = [c["rsi"] for c in coins if c.get("rsi") is not None]
     if not rsi_vals:
         return
@@ -749,7 +778,10 @@ def bot_thread(symbol: str, stop_event: threading.Event):
             else:
                 # FIX 2026-10-18: Не торгуем в режиме тренда — высокий риск SL.
                 # Бот заточен под боковик (RSI+BB), трендовые сигналы отключены.
-                log.info(f"[{symbol}] Trending mode (ADX:{adx:.1f}) — skip entry")
+                # v3.2: adx может быть None (мало свечей / ATR не посчитан) —
+                # форматирование f"{adx:.1f}" на None падало с TypeError.
+                adx_txt = f"{adx:.1f}" if adx is not None else "n/a"
+                log.info(f"[{symbol}] Trending mode (ADX:{adx_txt}) — skip entry")
                 signal = None
 
             if not signal:
@@ -811,13 +843,15 @@ def print_status():
 # ═══════════════════════════════════════════════════
 
 def main():
-    global block_new_trades, adapter_counter, consecutive_stops
+    # v3.2: все global — в начале функции (mid-function global = SyntaxError,
+    # если имя уже использовалось выше)
+    global block_new_trades, adapter_counter, consecutive_stops, daily_pnl
     global RSI_BUY_CURRENT, RSI_SELL_CURRENT
 
     log.info("=" * 54)
-    log.info(f"  🚀 MANAGER v3 | Hermes:{'ON' if HERMES_ENABLED else 'OFF'}")
+    log.info(f"  🚀 MANAGER v3.2 | Hermes:{'ON' if HERMES_ENABLED else 'OFF'}")
     log.info(f"  BB{BB_PERIOD}/{BB_STD}σ + RSI + ATR{ATR_PERIOD} | TP×{ATR_TP_MULT} SL×{ATR_SL_MULT}")
-    log.info(f"  MaxBots:{MAX_BOTS} | Limit:{DAILY_LOSS_LIMIT}$")
+    log.info(f"  MaxBots:{MAX_BOTS} | Limit:{DAILY_LOSS_LIMIT}$ | QTY:{QTY_USDT_BASE}$ | MinSL:{MIN_SL_PCT:.2%}")
     log.info("=" * 54)
     tg.notify_manager_started(MAX_BOTS, SCAN_INTERVAL_MIN)
 
@@ -827,7 +861,6 @@ def main():
         while True:
             today = datetime.now().strftime("%Y-%m-%d")
             if today != last_reset_day:
-                global daily_pnl
                 daily_pnl = 0.0; block_new_trades = False; consecutive_stops = 0
                 last_reset_day = today
                 log.info("🌅 New day — PnL reset")
