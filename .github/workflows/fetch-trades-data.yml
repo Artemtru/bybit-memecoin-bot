@@ -1,0 +1,61 @@
+name: 📊 Fetch Trades Data
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Download trades.json and logs from VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /root/bybit-memecoin-bot/logs
+            echo "=== trades.json full content ==="
+            cat trades.json 2>/dev/null || echo "NO TRADES FILE"
+            echo ""
+            echo "=== Trade summary stats ==="
+            if [ -f trades.json ]; then
+              python3 << 'PYEOF'
+            import json
+            with open('trades.json', 'r') as f:
+                trades = json.load(f)
+            
+            total = len(trades)
+            wins = sum(1 for t in trades if t.get('result') == 'TP')
+            losses = sum(1 for t in trades if t.get('result') == 'SL')
+            total_pnl = sum(t.get('pnl', 0) for t in trades)
+            avg_win = sum(t['pnl'] for t in trades if t.get('result') == 'TP' and t.get('pnl', 0) > 0) / wins if wins > 0 else 0
+            avg_loss = sum(t['pnl'] for t in trades if t.get('result') == 'SL' and t.get('pnl', 0) < 0) / losses if losses > 0 else 0
+            
+            print(f"Total trades: {total}")
+            print(f"Wins (TP): {wins} ({wins/total*100:.1f}%)")
+            print(f"Losses (SL): {losses} ({losses/total*100:.1f}%)")
+            print(f"Win rate: {wins/total*100:.1f}%")
+            print(f"Total PnL: ${total_pnl:.2f}")
+            print(f"Avg win: ${avg_win:.3f}")
+            print(f"Avg loss: ${avg_loss:.3f}")
+            print(f"R:R ratio: {abs(avg_win/avg_loss):.2f}:1" if avg_loss != 0 else "N/A")
+            
+            # PnL по дням
+            from collections import defaultdict
+            daily = defaultdict(float)
+            for t in trades:
+                daily[t['date']] += t.get('pnl', 0)
+            
+            print("\n=== Daily PnL ===")
+            for date in sorted(daily.keys())[-14:]:  # Last 14 days
+                print(f"{date}: ${daily[date]:+.2f}")
+            PYEOF
+            fi
+            
+            echo ""
+            echo "=== Last 3 manager logs ==="
+            ls -t manager_*.log 2>/dev/null | head -3 | while read log; do
+              echo "--- $log (errors only) ---"
+              grep -iE "error|exception|traceback|failed" "$log" | tail -20
+            done
