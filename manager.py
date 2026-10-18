@@ -747,16 +747,10 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                 if signal and pos_side is None:
                     open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct, adx)
             else:
-                signal = signal_trend(rsi)
-                if signal and pos_side and pos_side != signal:
-                    if pnl > 0:
-                        daily_pnl += pnl
-                        close_position(symbol, pos_side, pos_qty, pnl)
-                        time.sleep(1); pos_side, pos_qty = None, None
-                    else:
-                        log.info(f"[{symbol}] Opposite signal but PnL{pnl:+.4f} — hold for TP/SL")
-                if signal and pos_side is None:
-                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct, adx)
+                # FIX 2026-10-18: Не торгуем в режиме тренда — высокий риск SL.
+                # Бот заточен под боковик (RSI+BB), трендовые сигналы отключены.
+                log.info(f"[{symbol}] Trending mode (ADX:{adx:.1f}) — skip entry")
+                signal = None
 
             if not signal:
                 log.info(f"[{symbol}] No signal, waiting...")
