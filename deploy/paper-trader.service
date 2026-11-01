@@ -1,0 +1,17 @@
+[Unit]
+Description=Paper trader - BTC/ETH 4h breakout (NO real orders)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/paper
+ExecStart=/root/bybit-memecoin-bot/venv/bin/python -u paper_trader.py
+Restart=always
+RestartSec=30
+StandardOutput=append:/root/paper/service.log
+StandardError=append:/root/paper/service.log
+
+[Install]
+WantedBy=multi-user.target
