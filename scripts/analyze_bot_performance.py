@@ -10,7 +10,7 @@
 ║   • НЕ трогает структурные параметры (BB_PERIOD, ATR_PERIOD, ║
 ║     SCAN_INTERVAL_MIN, RSI_PERIOD) — их меняет только человек║
 ║   • LEVERAGE всегда целое, в диапазоне [1, 3]               ║
-║   • DAILY_LOSS_LIMIT никогда не поднимается выше -50         ║
+║   • DAILY_LOSS_LIMIT никогда не мягче -50 (диапазон -50…-1)  ║
 ║   • Дополняет, а не заменяет живой strategy_adapter.py       ║
 ║   • Меняет параметры маленькими шагами, только при ≥N сделок ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -51,7 +51,7 @@ LIMITS = {
     "BB_STD":           {"min": 1.8,  "max": 3.0,  "type": float},
     "RSI_BUY":          {"min": 30.0, "max": 48.0, "type": float},
     "RSI_SELL":         {"min": 52.0, "max": 70.0, "type": float},
-    "DAILY_LOSS_LIMIT": {"min": -100.0, "max": -50.0, "type": float},  # никогда не мягче -50
+    "DAILY_LOSS_LIMIT": {"min": -50.0, "max": -1.0, "type": float},  # никогда не мягче -50
 }
 
 # СТРУКТУРНЫЕ параметры — НИКОГДА не трогаем автоматически
@@ -156,7 +156,7 @@ def optimize(env: dict, stats_7d: dict, stats_all: dict) -> tuple[dict, list]:
     qty      = get_num(env, "QTY_USDT", 20)
     tp_mult  = get_num(env, "ATR_TP_MULT", 2.0)
     sl_mult  = get_num(env, "ATR_SL_MULT", 1.0)
-    dll      = get_num(env, "DAILY_LOSS_LIMIT", -50)
+    dll      = get_num(env, "DAILY_LOSS_LIMIT", -15)
 
     # ── 1. Гигиена: привести LEVERAGE к целому в пределах ──
     lev_clamped = clamp("LEVERAGE", leverage)
