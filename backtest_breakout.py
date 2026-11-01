@@ -42,6 +42,7 @@ TRAIL_ATR  = E("BO_TRAIL_ATR", 3.0)
 TAKER      = E("BO_TAKER_FEE", 0.00055)
 SLIP       = E("BO_SLIPPAGE", 0.0005)             # 0.05% на сторону — мемкоины, рыночные ордера
 RISK_USDT  = E("BO_RISK_USDT", 1.0)
+MAX_SAME_DIR = int(E("BO_MAX_SAME_DIR", 3))      # лимит одновременных позиций в одну сторону (0 = без лимита)
 BASE       = "https://api.bybit.com"
 STEP_MS    = int(INTERVAL) * 60_000
 WARMUP     = max(EMA_SLOW * 3, DONCH + 1, 60)
@@ -171,6 +172,22 @@ def run(symbol, ts, O, H, L, C, V, funding, start_eval):
                    ext=entry, trailed=False, funding=0.0)
     return trades
 
+# ── портфель ───────────────────────────────────────────────────
+def portfolio_cap(trades, cap):
+    """Монеты коррелированы: не берём новую сделку, если в ту же сторону уже открыто cap позиций.
+    Приближение: отклонённая сделка не освобождает монету для более ранних повторных входов."""
+    acc = []
+    for t in sorted(trades, key=lambda x: (x["t_open"], x["symbol"])):
+        same = sum(1 for a in acc if a["side"] == t["side"] and a["t_close"] > t["t_open"])
+        if same < cap: acc.append(t)
+    return acc
+
+def dd_pct(trades, risk_frac):
+    eq = peak = 1.0; dd = 0.0
+    for t in sorted(trades, key=lambda x: x["t_close"]):
+        eq *= 1 + t["R"] * risk_frac; peak = max(peak, eq); dd = min(dd, eq / peak - 1)
+    return dd * 100
+
 # ── отчёт ──────────────────────────────────────────────────────
 def stats(tr):
     if not tr: return None
@@ -217,8 +234,14 @@ def main():
 
     if not allt:
         print("\nСделок нет."); return
+    print("\n" + line("ВСЕ СИГНАЛЫ", stats(allt)))
+    if MAX_SAME_DIR > 0:
+        allt = portfolio_cap(allt, MAX_SAME_DIR)
+        print(f"(лимит портфеля: не больше {MAX_SAME_DIR} позиций в одну сторону; дальше — только принятые сделки)")
     allt.sort(key=lambda x: x["t_close"])
-    print("\n" + line("ИТОГО", stats(allt)))
+    print(line("ИТОГО", stats(allt)))
+    for rp in (0.005, 0.01):
+        print(f"  maxDD депозита при риске {rp*100:.1f}% на сделку: {dd_pct(allt, rp):.1f}%")
 
     # устойчивость: первая и вторая половина периода отдельно
     mid = start_eval + a.days * 86_400_000 // 2
@@ -232,6 +255,12 @@ def main():
     print("\nПо месяцам (R):  " + "  ".join(f"{m}: {sum(x['R'] for x in v):+.1f}"
                                           for m, v in sorted(by_m.items())))
     pos_m = sum(1 for v in by_m.values() if sum(x["R"] for x in v) > 0)
+    by_y = defaultdict(list)
+    for t in allt:
+        by_y[datetime.fromtimestamp(t["t_close"] / 1000, timezone.utc).year].append(t)
+    print()
+    for y, v in sorted(by_y.items()):
+        print(line(f"  {y} год", stats(v)))
 
     # критерии допуска к реальным деньгам — заданы до получения результатов
     s = stats(allt)
