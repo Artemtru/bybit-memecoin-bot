@@ -304,9 +304,11 @@ def signal_sideways(closes, highs, lows, price, rsi, volumes=None):
     if volumes and len(volumes) >= 20:
         avg_vol = sum(volumes[-20:-1]) / 19
         vol_ok  = volumes[-1] > avg_vol * 1.3
-    if prev <= lower and price > lower and rsi < 55 and vol_ok:
+    # FIX 2026-11-01: пороги RSI берутся из RSI_BUY/RSI_SELL (раньше были
+    # зашиты 55/45, и настройки RSI в .env / адаптере ни на что не влияли).
+    if prev <= lower and price > lower and rsi < RSI_BUY_CURRENT and vol_ok:
         return "Buy",  mid, lower
-    if prev >= upper and price < upper and rsi > 45 and vol_ok:
+    if prev >= upper and price < upper and rsi > RSI_SELL_CURRENT and vol_ok:
         return "Sell", mid, upper
     return None, None, None
 
@@ -747,10 +749,22 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                 if signal and pos_side is None:
                     open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct, adx)
             else:
-                # FIX 2026-10-18: Не торгуем в режиме тренда — высокий риск SL.
-                # Бот заточен под боковик (RSI+BB), трендовые сигналы отключены.
-                log.info(f"[{symbol}] Trending mode (ADX:{adx:.1f}) — skip entry")
+                # FIX 2026-10-18: Не открываем позиции в режиме тренда — высокий риск SL.
+                # Бот заточен под боковик (RSI+BB), трендовые входы отключены.
+                # FIX 2026-11-01: открытую позицию продолжаем сопровождать —
+                # фиксируем прибыль по противоположному сигналу RSI, как раньше.
                 signal = None
+                adx_str = f"{adx:.1f}" if adx is not None else "n/a"
+                exit_signal = signal_trend(rsi) if pos_side else None
+                if exit_signal and exit_signal != pos_side and pnl > 0:
+                    log.info(f"[{symbol}] Trend mode (ADX:{adx_str}) — opposite RSI signal, take profit")
+                    daily_pnl += pnl
+                    close_position(symbol, pos_side, pos_qty, pnl)
+                    pos_side, pos_qty = None, None
+                elif pos_side:
+                    log.info(f"[{symbol}] Trend mode (ADX:{adx_str}) — holding {pos_side} for TP/SL")
+                else:
+                    log.info(f"[{symbol}] Trend mode (ADX:{adx_str} ATR%:{atr_pct}) — skip entry")
 
             if not signal:
                 log.info(f"[{symbol}] No signal, waiting...")
