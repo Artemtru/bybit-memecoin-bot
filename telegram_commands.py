@@ -13,18 +13,26 @@
   /coins   — детали по каждой монете
   /pnl     — текущий PnL за день
   /top     — свежий скан топ-монет рынка прямо сейчас
+  /balance — баланс и открытые позиции со счёта Bybit (read-only ключ)
+  /backtest — моделирование стратегии на истории (без реальных сделок)
   /help    — список команд
+
+Утренняя сводка: каждый день в MORNING_REPORT_TIME (МСК, по умолчанию 09:00)
+бот сам присылает /balance. Пустое значение MORNING_REPORT_TIME= отключает.
 """
 
 import os
 import json
 import time
+import threading
 import requests
 from dotenv import load_dotenv
 
 from scanner import scan
 import analytics
 import telegram_ai_control
+import account_reader
+import backtest
 
 load_dotenv()
 
@@ -41,7 +49,9 @@ def setup_commands():
         {"command": "status", "description": "📊 Общий статус системы"},
         {"command": "coins", "description": "🪙 Детали по каждой монете"},
         {"command": "pnl", "description": "💸 Текущий PnL за день"},
+        {"command": "balance", "description": "💼 Баланс и позиции на Bybit"},
         {"command": "top", "description": "🔍 Свежий скан топ-монет"},
+        {"command": "backtest", "description": "🧪 Моделирование стратегии"},
         {"command": "daily", "description": "📈 Отчёт за сегодня"},
         {"command": "weekly", "description": "📊 Отчёт за неделю"},
         {"command": "monthly", "description": "📅 Отчёт за месяц"},
@@ -191,7 +201,9 @@ def format_help():
         "/status — общий статус системы\n"
         "/coins — детали по каждой монете\n"
         "/pnl — текущий PnL за день\n"
-        "/top — свежий скан топ-монет\n\n"
+        "/balance — баланс и позиции на Bybit\n"
+        "/top — свежий скан топ-монет\n"
+        "/backtest — моделирование стратегии на истории\n\n"
         "<b>Аналитика:</b>\n"
         "/daily — отчёт за сегодня\n"
         "/weekly — отчёт за неделю\n"
@@ -207,6 +219,40 @@ def format_help():
         "  /ask Какие монеты перспективны?\n\n"
         "/help — этот список"
     )
+
+
+_backtest_lock = threading.Lock()
+
+
+def run_backtest_async(chat_id=None):
+    """Моделирование в фоне: бот продолжает отвечать на команды."""
+    if not _backtest_lock.acquire(blocking=False):
+        send_message("⏳ Моделирование уже идёт, дождись отчёта.", chat_id)
+        return
+
+    def job():
+        try:
+            send_message("🧪 Запускаю моделирование стратегии на истории Bybit "
+                         "(реальные сделки не совершаются). Займёт 1–3 минуты...", chat_id)
+            rep = backtest.run(progress=lambda m: send_message(m, chat_id))
+            send_message(backtest.format_report(rep), chat_id)
+            print(f"🧪 backtest: {backtest.publish_report_to_github()}")
+        except Exception as e:
+            send_message(f"⚠️ Моделирование не удалось: {e}", chat_id)
+        finally:
+            _backtest_lock.release()
+
+    threading.Thread(target=job, name="backtest", daemon=True).start()
+
+
+def maybe_send_morning_report():
+    """Раз в день в MORNING_REPORT_TIME (МСК) присылает сводку по счёту."""
+    try:
+        if all(account_reader._keys()) and account_reader.morning_report_due():
+            send_message(account_reader.format_snapshot("☀️ Утренняя сводка Bybit"))
+            account_reader.mark_morning_report_sent()
+    except Exception as e:
+        print(f"⚠️ Ошибка утренней сводки: {e}")
 
 
 def handle_update(update: dict):
@@ -227,6 +273,10 @@ def handle_update(update: dict):
         send_message(format_coins(), chat_id)
     elif text == "/pnl":
         send_message(format_pnl(), chat_id)
+    elif text == "/balance":
+        send_message(account_reader.format_snapshot(), chat_id)
+    elif text == "/backtest":
+        run_backtest_async(chat_id)
     elif text == "/top":
         send_message("🔍 Сканирую рынок, секунду...", chat_id)
         send_message(format_top(), chat_id)
@@ -289,10 +339,17 @@ def main():
     
     # Регистрируем команды в меню Telegram
     setup_commands()
+
+    # Новая версия моделирования после деплоя → прогоняется сама один раз
+    if backtest.needs_auto_run():
+        run_backtest_async()
     
     offset = None
 
     while True:
+        # Проверяется не реже раза в ~30 сек (long-poll таймаут)
+        maybe_send_morning_report()
+
         try:
             params = {"timeout": 30}
             if offset:
