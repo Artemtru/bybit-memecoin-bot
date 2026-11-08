@@ -13,7 +13,11 @@
   /coins   — детали по каждой монете
   /pnl     — текущий PnL за день
   /top     — свежий скан топ-монет рынка прямо сейчас
+  /balance — баланс и открытые позиции со счёта Bybit (read-only ключ)
   /help    — список команд
+
+Утренняя сводка: каждый день в MORNING_REPORT_TIME (МСК, по умолчанию 09:00)
+бот сам присылает /balance. Пустое значение MORNING_REPORT_TIME= отключает.
 """
 
 import os
@@ -25,6 +29,7 @@ from dotenv import load_dotenv
 from scanner import scan
 import analytics
 import telegram_ai_control
+import account_reader
 
 load_dotenv()
 
@@ -41,6 +46,7 @@ def setup_commands():
         {"command": "status", "description": "📊 Общий статус системы"},
         {"command": "coins", "description": "🪙 Детали по каждой монете"},
         {"command": "pnl", "description": "💸 Текущий PnL за день"},
+        {"command": "balance", "description": "💼 Баланс и позиции на Bybit"},
         {"command": "top", "description": "🔍 Свежий скан топ-монет"},
         {"command": "daily", "description": "📈 Отчёт за сегодня"},
         {"command": "weekly", "description": "📊 Отчёт за неделю"},
@@ -191,6 +197,7 @@ def format_help():
         "/status — общий статус системы\n"
         "/coins — детали по каждой монете\n"
         "/pnl — текущий PnL за день\n"
+        "/balance — баланс и позиции на Bybit\n"
         "/top — свежий скан топ-монет\n\n"
         "<b>Аналитика:</b>\n"
         "/daily — отчёт за сегодня\n"
@@ -207,6 +214,16 @@ def format_help():
         "  /ask Какие монеты перспективны?\n\n"
         "/help — этот список"
     )
+
+
+def maybe_send_morning_report():
+    """Раз в день в MORNING_REPORT_TIME (МСК) присылает сводку по счёту."""
+    try:
+        if account_reader.morning_report_due():
+            send_message(account_reader.format_snapshot("☀️ Утренняя сводка Bybit"))
+            account_reader.mark_morning_report_sent()
+    except Exception as e:
+        print(f"⚠️ Ошибка утренней сводки: {e}")
 
 
 def handle_update(update: dict):
@@ -227,6 +244,8 @@ def handle_update(update: dict):
         send_message(format_coins(), chat_id)
     elif text == "/pnl":
         send_message(format_pnl(), chat_id)
+    elif text == "/balance":
+        send_message(account_reader.format_snapshot(), chat_id)
     elif text == "/top":
         send_message("🔍 Сканирую рынок, секунду...", chat_id)
         send_message(format_top(), chat_id)
@@ -293,6 +312,9 @@ def main():
     offset = None
 
     while True:
+        # Проверяется не реже раза в ~30 сек (long-poll таймаут)
+        maybe_send_morning_report()
+
         try:
             params = {"timeout": 30}
             if offset:
