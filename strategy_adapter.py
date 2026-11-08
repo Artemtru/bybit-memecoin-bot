@@ -7,6 +7,11 @@
 ║  • Избежать серий потерь                            ║
 ║  • Усилить то, что работает                         ║
 ║  • Защитить капитал при просадке                    ║
+║                                                      ║
+║  FIX 2026-11-08: подстройка параметров (RSI/BB/ATR) ║
+║  и запись в .env — только при STRATEGY_AUTO_TUNE=1. ║
+║  По умолчанию работает лишь защита от просадки,     ║
+║  а изменения приходят в Telegram как рекомендации.  ║
 ╚══════════════════════════════════════════════════════╝
 
 Вызывается из manager.py каждые N сканирований.
@@ -41,6 +46,10 @@ RSI_STEP   = 2.0    # сдвиг порога RSI
 BB_STD_STEP = 0.2   # сдвиг множителя σ Bollinger Bands
 ATR_TP_STEP = 0.2   # сдвиг множителя ATR для TP
 ATR_SL_STEP = 0.1   # сдвиг множителя ATR для SL
+
+
+def _auto_tune() -> bool:
+    return os.getenv("STRATEGY_AUTO_TUNE", "0") == "1"
 
 
 def _read_env(key, default):
@@ -107,6 +116,7 @@ def adapt(daily_pnl: float, rsi_buy: float, rsi_sell: float) -> dict:
     bb_std      = _read_env("BB_STD",      2.0)
     atr_tp_mult = _read_env("ATR_TP_MULT", 2.0)
     atr_sl_mult = _read_env("ATR_SL_MULT", 1.0)
+    original = (rsi_buy, rsi_sell, bb_std, atr_tp_mult, atr_sl_mult)
 
     changes        = []
     block_trades   = False
@@ -203,6 +213,14 @@ def adapt(daily_pnl: float, rsi_buy: float, rsi_sell: float) -> dict:
                 )
 
     # ── 5. Записать изменения в .env ─────────────────
+    # FIX 2026-11-08: без STRATEGY_AUTO_TUNE=1 параметры не меняются —
+    # остаются проверенными моделированием; изменения идут как рекомендации.
+    if params_changed and not _auto_tune():
+        changes = [c if c.startswith("⛔") or "убыточен за неделю" in c
+                   else f"💡 Рекомендация (не применена): {c}" for c in changes]
+        rsi_buy, rsi_sell, bb_std, atr_tp_mult, atr_sl_mult = original
+        params_changed = False
+
     if params_changed:
         _write_env({
             "BB_STD":      bb_std,

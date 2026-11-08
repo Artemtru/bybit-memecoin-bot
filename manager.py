@@ -11,6 +11,11 @@
 ║  • open_position signal="BUY"/"SELL" (not side)    ║
 ║  • coin_data.setdefault() prevents KeyError         ║
 ║  • scan() passes shared session                     ║
+║  Fixes 2026-11-08 (по итогам моделирования):        ║
+║  • сигналы только по ЗАКРЫТЫМ свечам                ║
+║  • один вход на свечу                               ║
+║  • RSI/BB/ATR из .env больше не перезаписываются    ║
+║    (STRATEGY_AUTO_TUNE=1 включает старое поведение) ║
 ╚══════════════════════════════════════════════════════╝
 """
 
@@ -75,6 +80,12 @@ SIDEWAYS_ATR_THRESHOLD = float(os.getenv("SIDEWAYS_ATR_THRESHOLD", "0.015"))
 
 RSI_BUY_CURRENT  = float(os.getenv("RSI_BUY",  "42"))
 RSI_SELL_CURRENT = float(os.getenv("RSI_SELL", "58"))
+
+# FIX 2026-11-08: авто-подстройка параметров (adapt_rsi_thresholds и
+# strategy_adapter) перезаписывала RSI/BB/ATR в .env, поэтому настройки
+# не работали, а проверенная моделированием конфигурация «уплывала».
+# По умолчанию выключено: параметры берутся только из .env.
+STRATEGY_AUTO_TUNE = os.getenv("STRATEGY_AUTO_TUNE", "0") == "1"
 
 # FIX 2026-10-15: strategy-risk hardening after a 0/15 winrate night.
 # 1) DAILY_LOSS_LIMIT default dropped from -50 to -2 — at QTY~20-30$ and
@@ -160,7 +171,9 @@ def reload_config():
 #   ТЕХНИЧЕСКИЕ ИНДИКАТОРЫ
 # ═══════════════════════════════════════════════════
 
-def get_klines(symbol, interval, limit=150):
+def get_klines(symbol, interval, limit=151):
+    # FIX 2026-11-08: limit 151 — последняя (незакрытая) свеча отбрасывается
+    # в bot_thread, для индикаторов остаётся 150 закрытых, как раньше.
     resp    = session.get_kline(category="linear", symbol=symbol, interval=interval, limit=limit)
     candles = list(reversed(resp["result"]["list"]))
     closes  = [float(c[4]) for c in candles]
@@ -356,6 +369,9 @@ def calc_qty(price, qty_usdt, qty_step, min_qty):
 
 
 def calc_adaptive_qty(price, atr_pct, qty_step, min_qty):
+    # NOTE 2026-11-08: atr_pct приходит в процентах (2.5 = 2.5%), поэтому
+    # объём почти всегда упирается в MIN_POSITION_USDT. Оставлено намеренно,
+    # пока преимущество стратегии не доказано моделированием на большей выборке.
     if not atr_pct or atr_pct <= 0:
         atr_pct = 0.02
     vol_mult = 1 / (1 + atr_pct * 10)
@@ -573,6 +589,11 @@ def update_env_rsi(new_buy, new_sell):
 
 def adapt_rsi_thresholds(coins):
     global RSI_BUY_CURRENT, RSI_SELL_CURRENT
+    # FIX 2026-11-08: раньше на каждом скане RSI сбрасывались в 42/58 и
+    # записывались в .env поверх твоих настроек. Теперь только при
+    # STRATEGY_AUTO_TUNE=1.
+    if not STRATEGY_AUTO_TUNE:
+        return
     rsi_vals = [c["rsi"] for c in coins if c.get("rsi") is not None]
     if not rsi_vals:
         return
@@ -652,6 +673,13 @@ def bot_thread(symbol: str, stop_event: threading.Event):
     while not stop_event.is_set():
         try:
             closes, highs, lows, volumes = get_klines(symbol, INTERVAL)
+            live_price = closes[-1]
+            # FIX 2026-11-08: сигналы только по ЗАКРЫТЫМ свечам. Раньше бот
+            # каждые 60 сек смотрел на незакрытую свечу, и сигнал «вернулись
+            # в канал» мог появиться и исчезнуть внутри одной свечи — отсюда
+            # ложные входы. Моделирование (backtest.py) работает так же.
+            closes, highs, lows, volumes = closes[:-1], highs[:-1], lows[:-1], volumes[:-1]
+            candle_key = f"{closes[-1]}|{highs[-1]}|{lows[-1]}|{volumes[-1]}"
             price   = closes[-1]
             rsi     = calc_rsi(closes, RSI_PERIOD)
             atr     = calc_atr(closes, highs, lows, ATR_PERIOD)
@@ -707,13 +735,13 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                 })
 
             log.info(
-                f"[{symbol}] {price:.6f} RSI:{rsi} ATR%:{atr_pct} "
+                f"[{symbol}] {live_price:.6f} (закр. {price:.6f}) RSI:{rsi} ATR%:{atr_pct} "
                 f"{mode} pos:{pos_side or 'none'} PnL:{pnl:+.4f}"
             )
 
             # FIX: setdefault preserves open_price/side/mode across iterations
             coin_data.setdefault(symbol, {}).update({
-                "price": price, "rsi": rsi, "atr_pct": atr_pct,
+                "price": live_price, "rsi": rsi, "atr_pct": atr_pct,
                 "mode": mode, "position": pos_side or "нет", "pnl": pnl,
             })
             save_status()
@@ -747,7 +775,13 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                     else:
                         log.info(f"[{symbol}] Opposite signal but PnL{pnl:+.4f} — hold for TP/SL")
                 if signal and pos_side is None:
-                    open_position(symbol, signal, price, atr, tick_size, qty_step, min_qty, mode, atr_pct, adx)
+                    # FIX 2026-11-08: один вход на одну закрытую свечу — сигнал
+                    # держится всю свечу (5 тиков), повторно по нему не входим.
+                    if coin_data.get(symbol, {}).get("last_entry_candle") == candle_key:
+                        log.info(f"[{symbol}] Signal on this candle already used — skip")
+                    else:
+                        coin_data.setdefault(symbol, {})["last_entry_candle"] = candle_key
+                        open_position(symbol, signal, live_price, atr, tick_size, qty_step, min_qty, mode, atr_pct, adx)
             else:
                 # FIX 2026-10-18: Не открываем позиции в режиме тренда — высокий риск SL.
                 # Бот заточен под боковик (RSI+BB), трендовые входы отключены.
@@ -829,9 +863,9 @@ def main():
     global RSI_BUY_CURRENT, RSI_SELL_CURRENT
 
     log.info("=" * 54)
-    log.info(f"  🚀 MANAGER v3 | Hermes:{'ON' if HERMES_ENABLED else 'OFF'}")
-    log.info(f"  BB{BB_PERIOD}/{BB_STD}σ + RSI + ATR{ATR_PERIOD} | TP×{ATR_TP_MULT} SL×{ATR_SL_MULT}")
-    log.info(f"  MaxBots:{MAX_BOTS} | Limit:{DAILY_LOSS_LIMIT}$")
+    log.info(f"  🚀 MANAGER v3 | Hermes:{'ON' if HERMES_ENABLED else 'OFF'} | AutoTune:{'ON' if STRATEGY_AUTO_TUNE else 'OFF'}")
+    log.info(f"  BB{BB_PERIOD}/{BB_STD}σ + RSI<{RSI_BUY_CURRENT}/{RSI_SELL_CURRENT} + ATR{ATR_PERIOD} | TP×{ATR_TP_MULT} SL×{ATR_SL_MULT}")
+    log.info(f"  MaxBots:{MAX_BOTS} | Limit:{DAILY_LOSS_LIMIT}$ | сигналы по закрытым свечам")
     log.info("=" * 54)
     tg.notify_manager_started(MAX_BOTS, SCAN_INTERVAL_MIN)
 

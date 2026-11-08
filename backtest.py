@@ -33,12 +33,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BACKTEST_VERSION = "2026-11-08.1"   # смена версии → авто-прогон после деплоя
+BACKTEST_VERSION = "2026-11-08.2"   # смена версии → авто-прогон после деплоя
 REPORT_FILE      = "logs/backtest_report.json"
 VERSION_FILE     = "logs/backtest_version.txt"
 BYBIT            = "https://api.bybit.com"
 
-DAYS       = int(os.getenv("BACKTEST_DAYS", "45"))
+DAYS       = int(os.getenv("BACKTEST_DAYS", "90"))   # 90 дн. → 50+ сделок для выводов
 INTERVAL   = os.getenv("INTERVAL", "15")
 TAKER_FEE  = 0.00055      # Bybit taker, каждая сторона
 SLIPPAGE   = 0.0005       # 0.05% на вход и выход по рынку
@@ -341,6 +341,10 @@ def metrics(trades: list, days: float) -> dict:
 
 # ═══════════════ прогон ═══════════════
 
+MIN_TRADES_IN  = 30     # минимум сделок в выборке подбора
+MIN_TRADES_OOS = 20     # минимум сделок вне выборки
+MIN_PF_OOS     = 1.3    # минимальный profit factor вне выборки
+
 GRID = {
     "RSI": [(30, 70), (35, 65), (42, 58)],
     "VOL_FILTER": [1.3, 0],
@@ -393,7 +397,7 @@ def run(symbols=None, days=DAYS, progress=None) -> dict:
         m = metrics(simulate(data, feats, p, t0, split), d_in)
         grid.append((p, m))
     # ранжируем по прибыли в выборке, только с достаточным числом сделок
-    ranked = sorted([g for g in grid if g[1]["trades"] >= 15],
+    ranked = sorted([g for g in grid if g[1]["trades"] >= MIN_TRADES_IN],
                     key=lambda g: (g[1]["profit_factor"], g[1]["total_pnl"]), reverse=True)[:5]
     top = []
     for p, m in ranked:
@@ -402,8 +406,23 @@ def run(symbols=None, days=DAYS, progress=None) -> dict:
                                                   "ATR_SL_MULT", "BB_STD", "SIDEWAYS_ATR_THRESHOLD")},
                     "in_sample": m, "out_of_sample": oos})
 
-    best = next((x for x in top if x["out_of_sample"]["profit_factor"] >= 1.15
-                 and x["out_of_sample"]["trades"] >= 10 and x["out_of_sample"]["total_pnl"] > 0), None)
+    # Строгий фильтр: вне выборки достаточно сделок, PF ≥ 1.3, прибыль,
+    # и обязательно лучше текущих настроек и по PF, и по PnL.
+    cur_oos = results["current_env"]["out_of_sample"]
+    best = next((x for x in top
+                 if x["out_of_sample"]["trades"] >= MIN_TRADES_OOS
+                 and x["out_of_sample"]["profit_factor"] >= MIN_PF_OOS
+                 and x["out_of_sample"]["total_pnl"] > 0
+                 and x["out_of_sample"]["profit_factor"] > cur_oos["profit_factor"]
+                 and x["out_of_sample"]["total_pnl"] > cur_oos["total_pnl"]), None)
+    if best:
+        verdict = "SWITCH"
+    elif cur_oos["trades"] >= MIN_TRADES_OOS and cur_oos["profit_factor"] >= 1.0 and cur_oos["total_pnl"] > 0:
+        verdict = "KEEP"
+    elif cur_oos["trades"] < MIN_TRADES_OOS:
+        verdict = "TOO_FEW_TRADES"
+    else:
+        verdict = "STOP"
     report = {
         "version": BACKTEST_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -413,7 +432,10 @@ def run(symbols=None, days=DAYS, progress=None) -> dict:
         "variants_tested": len(grid),
         "results": results, "top_in_sample": top,
         "recommendation": best,
-        "verdict": "OK" if best else "NO_EDGE",
+        "verdict": verdict,
+        "gate": {"min_trades_oos": MIN_TRADES_OOS, "min_pf_oos": MIN_PF_OOS,
+                 "must_beat_current": True},
+        "note": "сигналы по закрытым свечам, один вход на свечу — как в manager.py после 2026-11-08",
     }
     os.makedirs("logs", exist_ok=True)
     with open(REPORT_FILE, "w", encoding="utf-8") as f:
@@ -434,19 +456,26 @@ def format_report(rep: dict) -> str:
              f"{len(rep['symbols'])} монет)",
              f"Подбор: {rep['in_sample_days']} дн. → проверка: {rep['out_of_sample_days']} дн.\n",
              _line("Текущие настройки .env", rep["results"]["current_env"]),
-             _line("Как реально торгует (RSI 42/58)", rep["results"]["live_actual_rsi_42_58"]), ""]
-    if rep["recommendation"]:
+             _line("Вариант RSI 42/58", rep["results"]["live_actual_rsi_42_58"]), ""]
+    v = rep.get("verdict")
+    if v == "SWITCH":
         b = rep["recommendation"]; pp = b["params"]
-        lines += ["✅ <b>Найдена рабочая конфигурация</b>",
+        lines += ["✅ <b>Найдена конфигурация лучше текущей</b>",
                   f"RSI {pp['RSI_BUY']:g}/{pp['RSI_SELL']:g}, BB {pp['BB_STD']}σ, "
                   f"TP×{pp['ATR_TP_MULT']} SL×{pp['ATR_SL_MULT']}, "
                   f"объём-фильтр {'вкл' if pp['VOL_FILTER'] else 'выкл'}, "
                   f"боковик ATR&lt;{pp['SIDEWAYS_ATR_THRESHOLD']*100:g}%",
                   _line("Результат", b)]
+    elif v == "KEEP":
+        lines += ["✅ <b>Текущие настройки проходят проверку</b> — менять нечего.",
+                  "Ни один вариант не оказался надёжно лучше."]
+    elif v == "TOO_FEW_TRADES":
+        lines += ["⚠️ <b>Слишком мало сделок для вывода</b>",
+                  f"Нужно ≥{MIN_TRADES_OOS} сделок вне выборки. Настройки не меняю."]
     else:
-        lines += ["⛔ <b>Ни одна конфигурация не прошла проверку вне выборки</b>",
-                  f"(проверено {rep['variants_tested']} вариантов). Живую торговлю этой стратегией "
-                  "лучше не продолжать."]
+        lines += ["⛔ <b>Текущая стратегия убыточна вне выборки</b>",
+                  f"И ни один из {rep['variants_tested']} вариантов не прошёл фильтр. "
+                  "Живую торговлю лучше приостановить."]
     return "\n".join(lines)
 
 
