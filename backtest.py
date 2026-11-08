@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BACKTEST_VERSION = "2026-11-08.2"   # смена версии → авто-прогон после деплоя
+BACKTEST_VERSION = "2026-11-08.3"   # смена версии → авто-прогон после деплоя
 REPORT_FILE      = "logs/backtest_report.json"
 VERSION_FILE     = "logs/backtest_version.txt"
 BYBIT            = "https://api.bybit.com"
@@ -171,7 +171,16 @@ def precompute(d, bb_period=20):
             "mid": mid, "std": std, "prev": c[-2],
             "vol_ratio": v[-1] / (sum(v[-20:-1]) / 19) if sum(v[-20:-1]) > 0 else 0,
         }
+    # каналы Дончиана: максимум/минимум предыдущих N свечей (без текущей)
+    for N in TREND_CHANNELS:
+        for i in range(WINDOW - 1, n):
+            if feats[i] is not None and i >= N:
+                feats[i][f"hh{N}"] = max(d["high"][i - N:i])
+                feats[i][f"ll{N}"] = min(d["low"][i - N:i])
     return feats
+
+
+TREND_CHANNELS = (20, 48)
 
 
 # ═══════════════ параметры ═══════════════
@@ -317,6 +326,89 @@ def simulate(data: dict, feats: dict, p: dict, t_from=None, t_to=None) -> list:
     return trades
 
 
+def simulate_trend(data: dict, feats: dict, p: dict, t_from=None, t_to=None) -> list:
+    """Трендовая стратегия: пробой канала Дончиана по направлению EMA20/EMA50
+    при сильном тренде (ADX), стоп по ATR — фиксированный TP или трейлинг.
+    Те же лимиты риска, размер позиции и издержки, что у текущей стратегии."""
+    timeline = sorted({t for d in data.values() for t in d["ts"]
+                       if (t_from is None or t >= t_from) and (t_to is None or t < t_to)})
+    idx = {s: {t: i for i, t in enumerate(d["ts"])} for s, d in data.items()}
+    N = p["CHANNEL"]
+    pos, pending, last_stop = {}, {}, {}
+    trades, day, day_pnl, streak, block_until = [], None, 0.0, 0, 0
+
+    def close(sym, px, t, why):
+        nonlocal day_pnl, streak, block_until
+        ps = pos.pop(sym)
+        sgn = 1 if ps["side"] == "Buy" else -1
+        exit_px = px if why == "TP" else px * (1 - sgn * SLIPPAGE)
+        pnl = sgn * (exit_px - ps["entry"]) * ps["qty"] - (ps["entry"] + exit_px) * ps["qty"] * TAKER_FEE
+        trades.append({"symbol": sym, "side": ps["side"], "entry_ts": ps["ts"], "exit_ts": t,
+                       "pnl": pnl, "result": why, "notional": ps["entry"] * ps["qty"]})
+        day_pnl += pnl
+        if pnl < 0:
+            last_stop[sym] = t
+            streak += 1
+            if streak >= 3:
+                block_until, streak = t + 90 * 60_000, 0
+        else:
+            streak = 0
+
+    for t in timeline:
+        d_key = datetime.fromtimestamp(t / 1000, timezone.utc).date()
+        if d_key != day:
+            day, day_pnl, streak, block_until = d_key, 0.0, 0, 0
+        for sym, d in data.items():
+            i = idx[sym].get(t)
+            if i is None:
+                continue
+            o, h, l, c = d["open"][i], d["high"][i], d["low"][i], d["close"][i]
+            if sym in pending:
+                side, atr = pending.pop(sym)
+                if sym not in pos:
+                    sgn = 1 if side == "Buy" else -1
+                    entry = o * (1 + sgn * SLIPPAGE)
+                    sl_m = max(atr * p["SL_ATR"], entry * 0.005)
+                    notional = max(min(p["QTY_USDT"] / (1 + atr / entry * 1000),
+                                       p["MAX_POSITION_USDT"]), p["MIN_POSITION_USDT"])
+                    pos[sym] = {"side": side, "entry": entry, "qty": notional / entry, "ts": t,
+                                "sl": entry - sgn * sl_m,
+                                "tp": None if p["TRAIL"] else entry + sgn * atr * p["TP_ATR"]}
+            if sym in pos:
+                ps = pos[sym]
+                buy = ps["side"] == "Buy"
+                if (l <= ps["sl"]) if buy else (h >= ps["sl"]):
+                    gain = (ps["sl"] - ps["entry"]) * (1 if buy else -1)
+                    close(sym, ps["sl"], t, "TRAIL" if gain > 0 else "SL")
+                elif ps["tp"] is not None and ((h >= ps["tp"]) if buy else (l <= ps["tp"])):
+                    close(sym, ps["tp"], t, "TP")
+            f = feats[sym][i]
+            if f is None or f.get(f"hh{N}") is None or f["atr"] is None:
+                continue
+            if sym in pos:
+                if p["TRAIL"]:
+                    ps = pos[sym]
+                    if ps["side"] == "Buy":
+                        ps["sl"] = max(ps["sl"], c - p["SL_ATR"] * f["atr"])
+                    else:
+                        ps["sl"] = min(ps["sl"], c + p["SL_ATR"] * f["atr"])
+                continue
+            if day_pnl <= p["DAILY_LOSS_LIMIT"] or t < block_until or len(pos) >= p["MAX_BOTS"]:
+                continue
+            if sym in last_stop and t - last_stop[sym] < p["STOP_COOLDOWN_MIN"] * 60_000:
+                continue
+            if f["adx"] is None or f["adx"] < p["ADX_MIN"] or not (f["ema20"] and f["ema50"]):
+                continue
+            if f["ema20"] > f["ema50"] and c > f[f"hh{N}"]:
+                pending[sym] = ("Buy", f["atr"])
+            elif f["ema20"] < f["ema50"] and c < f[f"ll{N}"]:
+                pending[sym] = ("Sell", f["atr"])
+    for sym in list(pos):
+        d = data[sym]
+        close(sym, d["close"][-1], d["ts"][-1], "end")
+    return trades
+
+
 def metrics(trades: list, days: float) -> dict:
     """Определения как в Vibe-Trading backtest/metrics.py."""
     n = len(trades)
@@ -344,6 +436,13 @@ def metrics(trades: list, days: float) -> dict:
 MIN_TRADES_IN  = 30     # минимум сделок в выборке подбора
 MIN_TRADES_OOS = 20     # минимум сделок вне выборки
 MIN_PF_OOS     = 1.3    # минимальный profit factor вне выборки
+
+TREND_GRID = {
+    "CHANNEL": [20, 48],
+    "ADX_MIN": [20, 25, 30],
+    "SL_ATR": [1.5, 2.5],
+    "EXIT": ["trail", "tp3"],
+}
 
 GRID = {
     "RSI": [(30, 70), (35, 65), (42, 58)],
@@ -423,6 +522,26 @@ def run(symbols=None, days=DAYS, progress=None) -> dict:
         verdict = "TOO_FEW_TRADES"
     else:
         verdict = "STOP"
+    # ── трендовая стратегия ──
+    tgrid = []
+    for ch, adx_min, sl_atr, ex in itertools.product(*TREND_GRID.values()):
+        p = dict(base, CHANNEL=ch, ADX_MIN=adx_min, SL_ATR=sl_atr,
+                 TRAIL=(ex == "trail"), TP_ATR=3.0)
+        tgrid.append((p, metrics(simulate_trend(data, feats, p, t0, split), d_in)))
+    tranked = sorted([g for g in tgrid if g[1]["trades"] >= MIN_TRADES_IN],
+                     key=lambda g: (g[1]["profit_factor"], g[1]["total_pnl"]), reverse=True)[:5]
+    ttop = []
+    for p, m in tranked:
+        ttop.append({"params": {k: p[k] for k in ("CHANNEL", "ADX_MIN", "SL_ATR", "TRAIL", "TP_ATR")},
+                     "in_sample": m,
+                     "out_of_sample": metrics(simulate_trend(data, feats, p, split, None), d_out)})
+    tbest = next((x for x in ttop
+                  if x["out_of_sample"]["trades"] >= MIN_TRADES_OOS
+                  and x["out_of_sample"]["profit_factor"] >= MIN_PF_OOS
+                  and x["out_of_sample"]["total_pnl"] > 0), None)
+    trend = {"variants_tested": len(tgrid), "top_in_sample": ttop, "recommendation": tbest,
+             "verdict": "TREND_OK" if tbest else ("TREND_TOO_FEW_TRADES" if not ttop else "TREND_NO_EDGE")}
+
     report = {
         "version": BACKTEST_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -435,6 +554,7 @@ def run(symbols=None, days=DAYS, progress=None) -> dict:
         "verdict": verdict,
         "gate": {"min_trades_oos": MIN_TRADES_OOS, "min_pf_oos": MIN_PF_OOS,
                  "must_beat_current": True},
+        "trend": trend,
         "note": "сигналы по закрытым свечам, один вход на свечу — как в manager.py после 2026-11-08",
     }
     os.makedirs("logs", exist_ok=True)
@@ -476,6 +596,23 @@ def format_report(rep: dict) -> str:
         lines += ["⛔ <b>Текущая стратегия убыточна вне выборки</b>",
                   f"И ни один из {rep['variants_tested']} вариантов не прошёл фильтр. "
                   "Живую торговлю лучше приостановить."]
+    tr = rep.get("trend")
+    if tr:
+        lines += ["", f"📈 <b>Трендовая стратегия</b> (пробой канала + ADX + стоп по ATR, "
+                      f"{tr['variants_tested']} вариантов)"]
+        if tr["top_in_sample"]:
+            x = tr["recommendation"] or tr["top_in_sample"][0]
+            pp = x["params"]
+            lines.append(f"{'Прошёл фильтр' if tr['recommendation'] else 'Лучший по подбору'}: "
+                         f"канал {pp['CHANNEL']} св., ADX≥{pp['ADX_MIN']}, стоп {pp['SL_ATR']}×ATR, "
+                         f"{'трейлинг' if pp['TRAIL'] else 'TP 3×ATR'}")
+            lines.append(_line("Результат", x))
+        if tr["verdict"] == "TREND_OK":
+            lines.append("✅ Трендовая стратегия прошла проверку вне выборки.")
+        elif tr["verdict"] == "TREND_TOO_FEW_TRADES":
+            lines.append("⚠️ Слишком мало сделок для вывода.")
+        else:
+            lines.append("⛔ Трендовая стратегия тоже не прошла фильтр.")
     return "\n".join(lines)
 
 

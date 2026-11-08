@@ -87,6 +87,15 @@ RSI_SELL_CURRENT = float(os.getenv("RSI_SELL", "58"))
 # По умолчанию выключено: параметры берутся только из .env.
 STRATEGY_AUTO_TUNE = os.getenv("STRATEGY_AUTO_TUNE", "0") == "1"
 
+# FIX 2026-11-08: пауза торговли. Если в папке бота есть файл PAUSE —
+# новые позиции не открываются; открытые сопровождаются до TP/SL.
+# Снять паузу = удалить файл PAUSE из репозитория (деплой подхватит).
+PAUSE_FILE = "PAUSE"
+
+
+def trading_paused() -> bool:
+    return os.path.exists(PAUSE_FILE)
+
 # FIX 2026-10-15: strategy-risk hardening after a 0/15 winrate night.
 # 1) DAILY_LOSS_LIMIT default dropped from -50 to -2 — at QTY~20-30$ and
 #    leverage 2x, a single SL is ~$0.07-0.09, so -50 could never realistically
@@ -761,7 +770,9 @@ def bot_thread(symbol: str, stop_event: threading.Event):
             if last_stop is not None:
                 cooldown_left = STOP_COOLDOWN_MIN * 60 - (time.time() - last_stop)
             in_cooldown = cooldown_left > 0
-            if block_new_trades and not pos_side:
+            if trading_paused() and not pos_side:
+                log.info(f"[{symbol}] ⏸ Торговля на паузе (файл PAUSE) — новые входы отключены")
+            elif block_new_trades and not pos_side:
                 log.info(f"[{symbol}] New entries blocked")
             elif in_cooldown and not pos_side:
                 log.info(f"[{symbol}] Cooldown after stop — {cooldown_left/60:.1f}min left, skip new entries")
@@ -774,7 +785,7 @@ def bot_thread(symbol: str, stop_event: threading.Event):
                         time.sleep(1); pos_side, pos_qty = None, None
                     else:
                         log.info(f"[{symbol}] Opposite signal but PnL{pnl:+.4f} — hold for TP/SL")
-                if signal and pos_side is None:
+                if signal and pos_side is None and not trading_paused():
                     # FIX 2026-11-08: один вход на одну закрытую свечу — сигнал
                     # держится всю свечу (5 тиков), повторно по нему не входим.
                     if coin_data.get(symbol, {}).get("last_entry_candle") == candle_key:
@@ -868,6 +879,11 @@ def main():
     log.info(f"  MaxBots:{MAX_BOTS} | Limit:{DAILY_LOSS_LIMIT}$ | сигналы по закрытым свечам")
     log.info("=" * 54)
     tg.notify_manager_started(MAX_BOTS, SCAN_INTERVAL_MIN)
+    if trading_paused():
+        log.warning("⏸ Торговля на паузе: файл PAUSE найден, новые входы отключены")
+        tg.send_message("⏸ <b>Торговля на паузе</b>\nНовые сделки не открываются, "
+                        "открытые позиции сопровождаются до TP/SL.\n"
+                        "Причина: моделирование не подтвердило прибыльность стратегии.")
 
     last_reset_day = datetime.now().strftime("%Y-%m-%d")
 
