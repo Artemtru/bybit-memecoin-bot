@@ -38,6 +38,7 @@ import telegram_notifier as tg
 import pnl_tracker as tracker
 import analytics
 import strategy_adapter as adapter
+import live_trader
 
 # FIX: HERMES_ENABLED read AFTER load_dotenv()
 HERMES_ENABLED   = os.getenv("HERMES_ENABLED", "0") == "1"
@@ -884,6 +885,13 @@ def main():
         tg.send_message("⏸ <b>Торговля на паузе</b>\nНовые сделки не открываются, "
                         "открытые позиции сопровождаются до TP/SL.\n"
                         "Причина: моделирование не подтвердило прибыльность стратегии.")
+
+    # Реальная торговля BTC/ETH (4h пробой) — отдельный поток, настройки в LIVE_BREAKOUT.json.
+    # Не зависит от PAUSE: пауза относится только к мемкоин-стратегии.
+    try:
+        live_trader.start(session)
+    except Exception as e:
+        log.error(f"live_trader не запустился: {e}")
 
     last_reset_day = datetime.now().strftime("%Y-%m-%d")
 

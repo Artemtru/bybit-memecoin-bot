@@ -16,6 +16,7 @@
   /balance — баланс и открытые позиции со счёта Bybit (read-only ключ)
   /backtest — моделирование стратегии на истории (без реальных сделок)
   /funding  — моделирование арбитража funding (спот-лонг + фьючерс-шорт)
+  /live     — реальная торговля BTC/ETH: позиции, сделки, итог
   /help    — список команд
 
 Утренняя сводка: каждый день в MORNING_REPORT_TIME (МСК, по умолчанию 09:00)
@@ -35,6 +36,7 @@ import telegram_ai_control
 import account_reader
 import backtest
 import funding_backtest
+import live_trader
 
 load_dotenv()
 
@@ -48,6 +50,7 @@ API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 def setup_commands():
     """Регистрация команд в меню Telegram через setMyCommands API"""
     commands = [
+        {"command": "live", "description": "💵 Реальная торговля BTC/ETH"},
         {"command": "status", "description": "📊 Общий статус системы"},
         {"command": "coins", "description": "🪙 Детали по каждой монете"},
         {"command": "pnl", "description": "💸 Текущий PnL за день"},
@@ -201,6 +204,7 @@ def format_help():
     return (
         "🤖 <b>Доступные команды</b>\n\n"
         "<b>Статус:</b>\n"
+        "/live — реальная торговля BTC/ETH\n"
         "/status — общий статус системы\n"
         "/coins — детали по каждой монете\n"
         "/pnl — текущий PnL за день\n"
@@ -310,6 +314,8 @@ def handle_update(update: dict):
         send_message(account_reader.format_snapshot(), chat_id)
     elif text == "/backtest":
         run_backtest_async(chat_id)
+    elif text == "/live":
+        send_message(live_trader.status_text(), chat_id)
     elif text == "/funding":
         run_job_async("funding", chat_id)
     elif text == "/top":
