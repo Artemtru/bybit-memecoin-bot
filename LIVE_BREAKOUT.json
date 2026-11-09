@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "symbols": ["BTCUSDT", "ETHUSDT"],
+  "capital_usdt": 300,
+  "risk_pct": 1.0,
+  "max_drawdown_pct": 15,
+  "max_risk_mult": 2.0,
+  "leverage": 2,
+  "resume_after_kill": false,
+  "_comment": "Живая торговля BTC/ETH 4h пробой. enabled=false — новых входов нет, открытые позиции сопровождаются до стопа. Риск на сделку = capital_usdt * risk_pct%. Аварийный стоп при убытке max_drawdown_pct% от capital_usdt; продолжить — resume_after_kill=true."
+}
