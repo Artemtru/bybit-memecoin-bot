@@ -15,6 +15,7 @@
   /top     — свежий скан топ-монет рынка прямо сейчас
   /balance — баланс и открытые позиции со счёта Bybit (read-only ключ)
   /backtest — моделирование стратегии на истории (без реальных сделок)
+  /funding  — моделирование арбитража funding (спот-лонг + фьючерс-шорт)
   /help    — список команд
 
 Утренняя сводка: каждый день в MORNING_REPORT_TIME (МСК, по умолчанию 09:00)
@@ -33,6 +34,7 @@ import analytics
 import telegram_ai_control
 import account_reader
 import backtest
+import funding_backtest
 
 load_dotenv()
 
@@ -52,6 +54,7 @@ def setup_commands():
         {"command": "balance", "description": "💼 Баланс и позиции на Bybit"},
         {"command": "top", "description": "🔍 Свежий скан топ-монет"},
         {"command": "backtest", "description": "🧪 Моделирование стратегии"},
+        {"command": "funding", "description": "💰 Моделирование арбитража funding"},
         {"command": "daily", "description": "📈 Отчёт за сегодня"},
         {"command": "weekly", "description": "📊 Отчёт за неделю"},
         {"command": "monthly", "description": "📅 Отчёт за месяц"},
@@ -203,7 +206,8 @@ def format_help():
         "/pnl — текущий PnL за день\n"
         "/balance — баланс и позиции на Bybit\n"
         "/top — свежий скан топ-монет\n"
-        "/backtest — моделирование стратегии на истории\n\n"
+        "/backtest — моделирование стратегии на истории\n"
+        "/funding — моделирование арбитража funding\n\n"
         "<b>Аналитика:</b>\n"
         "/daily — отчёт за сегодня\n"
         "/weekly — отчёт за неделю\n"
@@ -223,26 +227,55 @@ def format_help():
 
 _backtest_lock = threading.Lock()
 
+# Моделирования (тяжёлые расчёты) идут по одному, в фоне — бот отвечает на команды.
+JOBS = {
+    "backtest": ("🧪 Запускаю моделирование стратегии на истории Bybit "
+                 "(реальные сделки не совершаются). Займёт 1–5 минут...",
+                 backtest.run, backtest.format_report, backtest.needs_auto_run),
+    "funding":  ("💰 Запускаю моделирование арбитража funding на истории Bybit за 3 года "
+                 "(реальные сделки не совершаются). Займёт 1–3 минуты...",
+                 funding_backtest.run, funding_backtest.format_report, funding_backtest.needs_auto_run),
+}
 
-def run_backtest_async(chat_id=None):
-    """Моделирование в фоне: бот продолжает отвечать на команды."""
+
+def _run_job(kind, chat_id=None):
+    intro, run, fmt, _ = JOBS[kind]
+    try:
+        send_message(intro, chat_id)
+        rep = run(progress=lambda m: send_message(m, chat_id))
+        send_message(fmt(rep), chat_id)
+        if kind == "backtest":
+            print(f"🧪 backtest: {backtest.publish_report_to_github()}")
+    except Exception as e:
+        send_message(f"⚠️ Моделирование не удалось: {e}", chat_id)
+
+
+def run_job_async(kind, chat_id=None):
     if not _backtest_lock.acquire(blocking=False):
         send_message("⏳ Моделирование уже идёт, дождись отчёта.", chat_id)
         return
 
     def job():
         try:
-            send_message("🧪 Запускаю моделирование стратегии на истории Bybit "
-                         "(реальные сделки не совершаются). Займёт 1–3 минуты...", chat_id)
-            rep = backtest.run(progress=lambda m: send_message(m, chat_id))
-            send_message(backtest.format_report(rep), chat_id)
-            print(f"🧪 backtest: {backtest.publish_report_to_github()}")
-        except Exception as e:
-            send_message(f"⚠️ Моделирование не удалось: {e}", chat_id)
+            _run_job(kind, chat_id)
         finally:
             _backtest_lock.release()
 
-    threading.Thread(target=job, name="backtest", daemon=True).start()
+    threading.Thread(target=job, name=kind, daemon=True).start()
+
+
+def run_backtest_async(chat_id=None):
+    run_job_async("backtest", chat_id)
+
+
+def auto_run_after_deploy():
+    """Новая версия моделирования после деплоя → прогоняется сама один раз, по очереди."""
+    def job():
+        for kind, (_, _, _, needs) in JOBS.items():
+            if needs():
+                with _backtest_lock:
+                    _run_job(kind)
+    threading.Thread(target=job, name="auto-run", daemon=True).start()
 
 
 def maybe_send_morning_report():
@@ -277,6 +310,8 @@ def handle_update(update: dict):
         send_message(account_reader.format_snapshot(), chat_id)
     elif text == "/backtest":
         run_backtest_async(chat_id)
+    elif text == "/funding":
+        run_job_async("funding", chat_id)
     elif text == "/top":
         send_message("🔍 Сканирую рынок, секунду...", chat_id)
         send_message(format_top(), chat_id)
@@ -341,8 +376,7 @@ def main():
     setup_commands()
 
     # Новая версия моделирования после деплоя → прогоняется сама один раз
-    if backtest.needs_auto_run():
-        run_backtest_async()
+    auto_run_after_deploy()
     
     offset = None
 
