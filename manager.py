@@ -893,6 +893,13 @@ def main():
     except Exception as e:
         log.error(f"live_trader не запустился: {e}")
 
+    # Выгрузка позиций и сделок в Supabase для дашборда trade.syoma-dashboard.ru
+    try:
+        import supabase_sync
+        supabase_sync.start()
+    except Exception as e:
+        log.error(f"supabase_sync не запустился: {e}")
+
     last_reset_day = datetime.now().strftime("%Y-%m-%d")
 
     try:
