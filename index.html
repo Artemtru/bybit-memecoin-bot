@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trade Desk</title>
+<meta name="robots" content="noindex,nofollow">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{
+  --bg:#f6f7f9;--panel:#fff;--ink:#14171c;--muted:#68707d;--line:#e4e7ec;
+  --pos:#0f8a5f;--neg:#c2410c;--accent:#2f5bd8;--warn:#b7791f;--chip:#eef1f6;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0e1116;--panel:#161a21;--ink:#e7eaf0;--muted:#8b93a1;--line:#252b35;
+  --pos:#34c78f;--neg:#f0794a;--accent:#7a9cff;--warn:#e0b14a;--chip:#1f2530;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Inter,system-ui,sans-serif}
+.num{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px;max-width:1200px;margin:0 auto}
+h1{font-size:18px;margin:0;font-weight:600;letter-spacing:-.01em}
+h1 span{color:var(--muted);font-weight:400}
+main{max-width:1200px;margin:0 auto;padding:0 16px 40px;display:grid;gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+.card h2{font-size:13px;font-weight:600;margin:0 0 12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
+.kpi .v{font-size:24px;font-weight:500;margin-top:4px}
+.kpi .s{color:var(--muted);font-size:12px;margin-top:2px}
+.pos{color:var(--pos)}.neg{color:var(--neg)}.muted{color:var(--muted)}
+.grid2{display:grid;grid-template-columns:2fr 1fr;gap:14px}
+@media (max-width:860px){.grid2{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-size:12px;color:var(--muted);font-weight:500}
+td.r,th.r{text-align:right}
+.scroll{overflow-x:auto}
+.chip{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--chip);font-size:12px}
+.chip.live{color:var(--accent)}.chip.paper{color:var(--muted)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.status-row{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)}
+.status-row:last-child{border:0}
+button,input{font:inherit}
+button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 14px;cursor:pointer}
+button.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
+input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
+.login{max-width:380px;margin:12vh auto;display:grid;gap:12px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{background:transparent;color:var(--muted);border-radius:0;padding:5px 10px}
+.seg button.on{background:var(--chip);color:var(--ink)}
+.review{white-space:pre-wrap;font-size:13px}
+.empty{color:var(--muted);padding:8px 0}
+.hidden{display:none}
+.chartbox{position:relative;height:240px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Trade Desk <span>· 4h пробой</span></h1>
+  <div id="who" class="muted"></div>
+</header>
+
+<section id="loginView" class="login hidden">
+  <div class="card">
+    <h2>Вход</h2>
+    <p class="muted" style="margin-top:0">Ссылка для входа придёт на почту.</p>
+    <input id="email" type="email" placeholder="email" autocomplete="email">
+    <div style="height:10px"></div>
+    <button id="sendLink">Получить ссылку</button>
+    <p id="loginMsg" class="muted"></p>
+  </div>
+</section>
+
+<main id="app" class="hidden">
+  <div id="noAccess" class="card hidden">
+    <h2>Доступ не выдан</h2>
+    <p class="muted">Вход выполнен, но этот аккаунт ещё не добавлен в список владельцев. Напиши в чат — добавлю.</p>
+  </div>
+
+  <div class="kpis">
+    <div class="card kpi"><div class="muted">Капитал</div><div class="v num" id="kEq">—</div><div class="s" id="kEqS"></div></div>
+    <div class="card kpi"><div class="muted">Зафиксировано</div><div class="v num" id="kReal">—</div><div class="s" id="kRealS"></div></div>
+    <div class="card kpi"><div class="muted">Сделок · win</div><div class="v num" id="kN">—</div><div class="s" id="kNS"></div></div>
+    <div class="card kpi"><div class="muted">Средний R</div><div class="v num" id="kAvg">—</div><div class="s">бэктест: +0.29R</div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card"><h2>Капитал (реальный счёт)</h2><div class="chartbox"><canvas id="eqChart"></canvas></div><div id="eqEmpty" class="empty hidden">Снимков пока нет — появятся в течение часа после подключения.</div></div>
+    <div class="card"><h2>Состояние</h2><div id="status"></div></div>
+  </div>
+
+  <div class="card">
+    <h2>Открытые позиции</h2>
+    <div class="scroll"><table>
+      <thead><tr><th></th><th>Монета</th><th>Сторона</th><th class="r">Вход</th><th class="r">Стоп</th><th class="r">Защищено</th><th class="r">Риск</th><th>Открыта</th></tr></thead>
+      <tbody id="posBody"></tbody>
+    </table></div>
+  </div>
+
+  <div class="card">
+    <h2>Реал против бумаги</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Монета</th><th class="r">Реал: сделок</th><th class="r">Реал: ΣR</th><th class="r">Бумага: сделок</th><th class="r">Бумага: ΣR</th><th class="r">Реал, $</th></tr></thead>
+      <tbody id="cmpBody"></tbody>
+    </table></div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h2 style="margin:0">Сделки</h2>
+      <div class="seg" id="srcSeg"><button data-s="live" class="on">Реал</button><button data-s="paper">Бумага</button><button data-s="all">Все</button></div>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th></th><th>Закрыта</th><th>Монета</th><th>Сторона</th><th>Выход</th><th class="r">Вход → выход</th><th class="r">Часов</th><th class="r">$</th><th class="r">R</th></tr></thead>
+      <tbody id="trBody"></tbody>
+    </table></div>
+  </div>
+
+  <div class="card">
+    <h2>Ревизор</h2>
+    <div id="review" class="review muted">Отчётов пока нет. Первый придёт в понедельник утром.</div>
+  </div>
+
+  <div style="display:flex;justify-content:space-between;align-items:center" class="muted">
+    <span id="updated"></span>
+    <button class="ghost" id="logout">Выйти</button>
+  </div>
+</main>
+
+<script>
+const SB_URL = "https://vwjeknpjrujjfhuhquci.supabase.co";
+const SB_KEY = "sb_publishable_5GE9vAkv0VtAb-6oVbSXkA_tkyXLbZ0";
+const sb = supabase.createClient(SB_URL, SB_KEY);
+const $ = id => document.getElementById(id);
+const fmtUsd = v => v == null ? "—" : (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2) + "$";
+const fmtR = v => v == null ? "—" : (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2) + "R";
+const fmtPx = v => v == null ? "—" : (v >= 100 ? Number(v).toLocaleString("ru-RU", {maximumFractionDigits: 2}) : Number(v).toFixed(4));
+const cls = v => v > 0 ? "pos" : v < 0 ? "neg" : "";
+const dt = s => s ? new Date(s).toLocaleString("ru-RU", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"}) : "—";
+const ago = s => { const m = Math.round((Date.now() - new Date(s)) / 60000); return m < 60 ? m + " мин назад" : Math.round(m/60) + " ч назад"; };
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+let src = "live", chart, trades = [];
+
+async function load() {
+  const [pos, tr, eq, hb, rv] = await Promise.all([
+    sb.from("positions").select("*").order("source"),
+    sb.from("trades").select("*").order("closed_at", {ascending: false}).limit(500),
+    sb.from("equity_snapshots").select("*").order("ts").limit(2000),
+    sb.from("heartbeat").select("*"),
+    sb.from("reviews").select("*").order("created_at", {ascending: false}).limit(1),
+  ]);
+  const anyData = [pos, tr, eq, hb].some(r => (r.data || []).length);
+  $("noAccess").classList.toggle("hidden", anyData);
+  trades = tr.data || [];
+  renderKpis(eq.data || [], hb.data || []);
+  renderStatus(hb.data || []);
+  renderPositions(pos.data || []);
+  renderCompare();
+  renderTrades();
+  renderEquity(eq.data || []);
+  const r = (rv.data || [])[0];
+  if (r) $("review").textContent = `${dt(r.created_at)} · ${({ok:"✅ всё в норме", watch:"👀 наблюдать", alert:"⚠️ внимание"})[r.verdict] || ""}\n\n${r.summary_md}`;
+  $("updated").textContent = "Обновлено " + new Date().toLocaleTimeString("ru-RU");
+}
+
+function renderKpis(eq, hb) {
+  const live = trades.filter(t => t.source === "live");
+  const lt = hb.find(h => h.service === "live_trader")?.info || {};
+  const last = eq[eq.length - 1];
+  const cap = lt.capital_usdt || 300;
+  if (last) {
+    $("kEq").textContent = Number(last.total_equity).toFixed(2) + "$";
+    const pct = (last.total_equity / cap - 1) * 100;
+    $("kEqS").innerHTML = `<span class="${cls(pct)}">${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%</span> от ${cap}$ · плавающая ${fmtUsd(Number(last.unrealized_usdt))}`;
+  }
+  const real = live.reduce((a, t) => a + Number(t.pnl_usdt || 0), 0);
+  $("kReal").innerHTML = `<span class="${cls(real)}">${fmtUsd(real)}</span>`;
+  $("kRealS").textContent = `лимит убытка −${(cap * (lt.max_drawdown_pct || 15) / 100).toFixed(0)}$`;
+  const wins = live.filter(t => Number(t.r) > 0).length;
+  $("kN").textContent = live.length ? `${live.length} · ${Math.round(wins / live.length * 100)}%` : "0";
+  $("kNS").textContent = "бэктест: win ~35%, ~1 сделка в неделю";
+  const avg = live.length ? live.reduce((a, t) => a + Number(t.r), 0) / live.length : null;
+  $("kAvg").innerHTML = avg == null ? "—" : `<span class="${cls(avg)}">${fmtR(avg)}</span>`;
+}
+
+function renderStatus(hb) {
+  const by = Object.fromEntries(hb.map(h => [h.service, h]));
+  const row = (label, h, text) => {
+    const stale = !h || (Date.now() - new Date(h.last_seen)) > 15 * 60000;
+    const color = !h ? "var(--muted)" : stale ? "var(--neg)" : "var(--pos)";
+    return `<div class="status-row"><span><span class="dot" style="background:${color}"></span>${label}</span><span class="muted">${h ? text + " · " + ago(h.last_seen) : "нет данных"}</span></div>`;
+  };
+  const lt = by.live_trader?.info || {};
+  const ltText = lt.killed ? "⛔ аварийный стоп" : lt.enabled ? `торгует, позиций ${lt.open_positions ?? 0}` : "входы выключены";
+  const pp = by.paper_trader?.info || {};
+  const mm = by.memecoin_bot?.info || {};
+  const risks = lt.symbols ? lt.symbols.map(s => `${s.replace("USDT","")} ${((lt.risk_pct_by_symbol||{})[s] ?? lt.risk_pct)}%`).join(", ") : "";
+  $("status").innerHTML =
+    row("Реальная торговля", by.live_trader, ltText) +
+    row("Бумажный бот", by.paper_trader, pp.last_bar ? "свеча " + dt(pp.last_bar) : "работает") +
+    row("Мемкоин-бот", by.memecoin_bot, mm.paused ? "⏸ пауза" : "активен") +
+    (risks ? `<div class="status-row"><span class="muted">Риск на сделку</span><span class="num" style="font-size:12px">${risks}</span></div>` : "");
+}
+
+function renderPositions(rows) {
+  if (!rows.length) { $("posBody").innerHTML = `<tr><td colspan="8" class="empty">Открытых позиций нет</td></tr>`; return; }
+  $("posBody").innerHTML = rows.map(p => {
+    const d = p.side === "Buy" ? 1 : -1;
+    const oneR = Math.abs(p.entry - (p.init_stop ?? p.stop));
+    const locked = oneR ? d * (p.stop - p.entry) / oneR : null;
+    return `<tr><td><span class="chip ${p.source}">${p.source === "live" ? "реал" : "бумага"}</span></td>
+      <td>${esc(p.symbol.replace("USDT",""))}</td><td>${d === 1 ? "🟢 лонг" : "🔴 шорт"}</td>
+      <td class="r num">${fmtPx(p.entry)}</td><td class="r num">${fmtPx(p.stop)}${p.trailed ? " ↻" : ""}</td>
+      <td class="r num ${cls(locked)}">${fmtR(locked)}</td>
+      <td class="r num">${p.risk_usdt != null ? Number(p.risk_usdt).toFixed(2) + "$" : "—"}</td>
+      <td class="muted">${dt(p.opened_at)}</td></tr>`;
+  }).join("");
+}
+
+function renderCompare() {
+  const syms = [...new Set(trades.map(t => t.symbol))].sort();
+  if (!syms.length) { $("cmpBody").innerHTML = `<tr><td colspan="6" class="empty">Закрытых сделок пока нет</td></tr>`; return; }
+  const agg = (s, src) => { const x = trades.filter(t => t.symbol === s && t.source === src); return [x.length, x.reduce((a, t) => a + Number(t.r), 0), x.reduce((a, t) => a + Number(t.pnl_usdt || 0), 0)]; };
+  $("cmpBody").innerHTML = syms.map(s => {
+    const [ln, lr, lu] = agg(s, "live"), [pn, pr] = agg(s, "paper");
+    return `<tr><td>${esc(s.replace("USDT",""))}</td><td class="r num">${ln}</td><td class="r num ${cls(lr)}">${ln ? fmtR(lr) : "—"}</td>
+      <td class="r num">${pn}</td><td class="r num ${cls(pr)}">${pn ? fmtR(pr) : "—"}</td><td class="r num ${cls(lu)}">${ln ? fmtUsd(lu) : "—"}</td></tr>`;
+  }).join("");
+}
+
+function renderTrades() {
+  const rows = src === "all" ? trades : trades.filter(t => t.source === src);
+  if (!rows.length) { $("trBody").innerHTML = `<tr><td colspan="9" class="empty">Сделок нет</td></tr>`; return; }
+  const why = {stop: "стоп", trail: "трейлинг", gap: "гэп"};
+  $("trBody").innerHTML = rows.map(t => `<tr>
+    <td><span class="chip ${t.source}">${t.source === "live" ? "реал" : "бумага"}</span></td>
+    <td class="muted">${dt(t.closed_at)}</td><td>${esc(t.symbol.replace("USDT",""))}</td>
+    <td>${t.side === "Buy" ? "лонг" : "шорт"}</td><td>${why[t.reason] || esc(t.reason)}</td>
+    <td class="r num">${fmtPx(t.entry)} → ${fmtPx(t.exit)}</td><td class="r num">${t.hours != null ? Math.round(t.hours) : "—"}</td>
+    <td class="r num ${cls(Number(t.pnl_usdt))}">${t.pnl_usdt != null ? fmtUsd(Number(t.pnl_usdt)) : "—"}</td>
+    <td class="r num ${cls(Number(t.r))}">${fmtR(Number(t.r))}</td></tr>`).join("");
+}
+
+function renderEquity(eq) {
+  $("eqEmpty").classList.toggle("hidden", eq.length > 0);
+  if (!eq.length) return;
+  const css = getComputedStyle(document.documentElement);
+  const accent = css.getPropertyValue("--accent").trim(), muted = css.getPropertyValue("--muted").trim(), line = css.getPropertyValue("--line").trim();
+  const data = { labels: eq.map(e => new Date(e.ts)), datasets: [{ data: eq.map(e => Number(e.total_equity)), borderColor: accent, borderWidth: 2, pointRadius: 0, tension: .2, fill: false }] };
+  if (chart) { chart.data = data; chart.update(); return; }
+  chart = new Chart($("eqChart"), { type: "line", data, options: {
+    responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false },
+      tooltip: { callbacks: { title: i => dt(i[0].label), label: i => i.parsed.y.toFixed(2) + "$" } } },
+    scales: { x: { type: "category", ticks: { color: muted, maxTicksLimit: 6, callback: function(v){ return new Date(this.getLabelForValue(v)).toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit"}); } }, grid: { display: false } },
+              y: { ticks: { color: muted, callback: v => v + "$" }, grid: { color: line } } } } });
+}
+
+$("srcSeg").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  src = b.dataset.s; [...$("srcSeg").children].forEach(x => x.classList.toggle("on", x === b)); renderTrades();
+});
+$("sendLink").onclick = async () => {
+  const email = $("email").value.trim(); if (!email) return;
+  $("loginMsg").textContent = "Отправляю…";
+  const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
+  $("loginMsg").textContent = error ? "Ошибка: " + error.message : "Готово. Открой ссылку из письма на этом устройстве.";
+};
+$("logout").onclick = async () => { await sb.auth.signOut(); location.reload(); };
+
+let timer;
+async function route() {
+  const { data: { session } } = await sb.auth.getSession();
+  $("loginView").classList.toggle("hidden", !!session);
+  $("app").classList.toggle("hidden", !session);
+  $("who").textContent = session ? session.user.email : "";
+  clearInterval(timer);
+  if (session) { await load(); timer = setInterval(load, 60000); }
+}
+sb.auth.onAuthStateChange(() => route());
+route();
+</script>
+</body>
+</html>
