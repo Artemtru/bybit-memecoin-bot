@@ -41,7 +41,7 @@ SETTLE      = 20_000       # ждём 20 с после закрытия свеч
 POLL_S      = 30
 
 DEFAULT_CFG = {"enabled": False, "symbols": ["BTCUSDT", "ETHUSDT"], "capital_usdt": 300,
-               "risk_pct": 1.0, "max_drawdown_pct": 15, "max_risk_mult": 2.0,
+               "risk_pct": 1.0, "risk_pct_by_symbol": {}, "max_drawdown_pct": 15, "max_risk_mult": 2.0,
                "leverage": 2, "resume_after_kill": False}
 
 _lock = threading.Lock()
@@ -67,7 +67,7 @@ def tg(text):
         return
     try:
         requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                      json={"chat_id": chat, "text": "💵 РЕАЛ BTC/ETH\n" + text}, timeout=10)
+                      json={"chat_id": chat, "text": "💵 РЕАЛ\n" + text}, timeout=10)
     except Exception as e:
         log(f"TG ошибка: {e}")
 
@@ -157,8 +157,10 @@ def closed_pnl_since(session, symbol, since_ms):
 
 # ═══════════════ логика ═══════════════
 
-def risk_usdt(cfg):
-    return cfg["capital_usdt"] * cfg["risk_pct"] / 100
+def risk_usdt(cfg, symbol=None):
+    """Риск на сделку в $. Для отдельных монет можно задать свой % в risk_pct_by_symbol."""
+    pct = cfg.get("risk_pct_by_symbol", {}).get(symbol, cfg["risk_pct"]) if symbol else cfg["risk_pct"]
+    return cfg["capital_usdt"] * pct / 100
 
 
 def entries_allowed(cfg, st):
@@ -173,7 +175,7 @@ def open_position(session, cfg, st, symbol, d, atr_v, sig_ts, entry_ts):
     s = st["symbols"][symbol]
     tick, step, minq = instrument(session, symbol)
     stop_dist = bb.STOP_ATR * atr_v
-    risk = risk_usdt(cfg)
+    risk = risk_usdt(cfg, symbol)
     qty = floor_qty(risk / stop_dist, step)
     if qty < minq:
         if minq * stop_dist <= risk * cfg["max_risk_mult"]:
@@ -323,9 +325,10 @@ def loop(session):
             st = load_state()
             if announced != cfg.get("enabled"):
                 announced = cfg.get("enabled")
+                risks = ", ".join(f"{x.replace('USDT', '')} {risk_usdt(cfg, x):.2f}$" for x in cfg["symbols"])
                 tg(f"{'▶️ Торговля включена' if announced else '⏸ Новые входы выключены'}: "
-                   f"{', '.join(cfg['symbols'])}, капитал {cfg['capital_usdt']}$, риск "
-                   f"{risk_usdt(cfg):.2f}$ на сделку, аварийный стоп −{cfg['max_drawdown_pct']}%")
+                   f"капитал {cfg['capital_usdt']}$, риск на сделку: {risks}; "
+                   f"не больше {bb.MAX_SAME_DIR} позиций в одну сторону, аварийный стоп −{cfg['max_drawdown_pct']}%")
             for sym in cfg["symbols"]:
                 try:
                     process(session, cfg, st, sym, int(time.time() * 1000))
@@ -362,11 +365,12 @@ def _safe_loop(session):
 
 def status_text():
     cfg, st, trades = load_config(), load_state(), load_trades()
-    lines = [f"💵 <b>Реальная торговля BTC/ETH</b> (4h пробой)",
+    lines = [f"💵 <b>Реальная торговля</b> (4h пробой)",
              f"Статус: {'включена' if cfg.get('enabled') else 'новые входы выключены'}"
              + (" | ⛔ аварийный стоп" if st.get("killed") else ""),
-             f"Капитал {cfg['capital_usdt']}$, риск {risk_usdt(cfg):.2f}$ на сделку, "
-             f"лимит убытка −{cfg['capital_usdt'] * cfg['max_drawdown_pct'] / 100:.0f}$", ""]
+             f"Капитал {cfg['capital_usdt']}$, лимит убытка −{cfg['capital_usdt'] * cfg['max_drawdown_pct'] / 100:.0f}$, "
+             f"не больше {bb.MAX_SAME_DIR} позиций в одну сторону",
+             "Риск на сделку: " + ", ".join(f"{x.replace('USDT', '')} {risk_usdt(cfg, x):.2f}$" for x in cfg["symbols"]), ""]
     for sym in cfg["symbols"]:
         p = st.get("symbols", {}).get(sym, {}).get("pos")
         if p:
